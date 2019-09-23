@@ -6,21 +6,22 @@
 #include <thread.h>
 #include <test.h>
 
+#define N_LORD_FLOWERKILLER 8
 #define NROPES 16
 static int ropes_left = NROPES;
 
-// Data structures for rope mappings
+/* Data structures for rope mappings */
 
 /* Implement this! */
 
-// Synchronization primitives 
+/* Synchronization primitives */
 
 /* Implement this! */
 
 /*
- * Describe your design and any invariants or locking protocols 
+ * Describe your design and any invariants or locking protocols
  * that must be maintained. Explain the exit conditions. How
- * do all threads know when they are done?  
+ * do all threads know when they are done?
  */
 
 static
@@ -29,10 +30,10 @@ dandelion(void *p, unsigned long arg)
 {
 	(void)p;
 	(void)arg;
-	
+
 	kprintf("Dandelion thread starting\n");
 
-	// Implement this function
+	/* Implement this function */
 }
 
 static
@@ -41,10 +42,10 @@ marigold(void *p, unsigned long arg)
 {
 	(void)p;
 	(void)arg;
-	
+
 	kprintf("Marigold thread starting\n");
 
-	// Implement this function
+	/* Implement this function */
 }
 
 static
@@ -53,10 +54,10 @@ flowerkiller(void *p, unsigned long arg)
 {
 	(void)p;
 	(void)arg;
-	
+
 	kprintf("Lord FlowerKiller thread starting\n");
 
-	// Implement this function
+	/* Implement this function */
 }
 
 static
@@ -65,10 +66,10 @@ balloon(void *p, unsigned long arg)
 {
 	(void)p;
 	(void)arg;
-	
+
 	kprintf("Balloon thread starting\n");
 
-	// Implement this function
+	/* Implement this function */
 }
 
 
@@ -77,26 +78,28 @@ int
 airballoon(int nargs, char **args)
 {
 
-	int err = 0;
+	int err = 0, i;
 
 	(void)nargs;
 	(void)args;
 	(void)ropes_left;
-	
+
 	err = thread_fork("Marigold Thread",
 			  NULL, marigold, NULL, 0);
 	if(err)
 		goto panic;
-	
+
 	err = thread_fork("Dandelion Thread",
 			  NULL, dandelion, NULL, 0);
 	if(err)
 		goto panic;
-	
-	err = thread_fork("Lord FlowerKiller Thread",
-			  NULL, flowerkiller, NULL, 0);
-	if(err)
-		goto panic;
+
+	for (i = 0; i < N_LORD_FLOWERKILLER; i++) {
+		err = thread_fork("Lord FlowerKiller Thread",
+				  NULL, flowerkiller, NULL, 0);
+		if(err)
+			goto panic;
+	}
 
 	err = thread_fork("Air Balloon",
 			  NULL, balloon, NULL, 0);
@@ -107,7 +110,7 @@ airballoon(int nargs, char **args)
 panic:
 	panic("airballoon: thread_fork failed: %s)\n",
 	      strerror(err));
-	
+
 done:
 	return 0;
 }
