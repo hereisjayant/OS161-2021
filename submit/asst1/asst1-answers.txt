@@ -24,6 +24,42 @@ con0 at lser0
 cpu0: MIPS/161 (System/161 2.x) features 0x0
 OS/161 kernel [? for menu]: 
 
+commit fff2d1b6c78a3ad88eb410f5d7ce063038a399c3 (HEAD -> master, tag: asst1-start, origin/master)
+Author: Zachary Choo <zachchoo@ssh-linux3.ece.ubc.ca>
+Date:   Sun Sep 19 21:45:58 2021 -0700
+
+    Initial commit of os161 for CPEN331
+
 asst1-start
 
-1. 
+1. The first line of code that is executed is in the file kern/arch/mips/locore/exception-mips1.S; it is either the line j common_exception under mips_utlb_handler if it is a UTLB exception, or j common_exception under mips_general_handler if it is a general exeption.
+
+After that common_exception calls mips_trap in kern/arch/mips/locore/trap.c, which will then further handle the exeption based on if it is an interrupt, system call, etc.
+
+From kern/arch/mips/locore/trap.c, it seems like the interrupt is treated like just another trap, so it doenst seem like it differs.
+
+2. The syscall line in userland/lib/libc/arch/mips/syscalls-mips.S
+
+3. it is so that both the user level programs and the kernel can make these function calls
+
+4. in configure, we see it configures PLATFORM to 'sys161' and MACHINE to 'mips'. It would be invalidated if you wanted a different hardware platform or machine type
+
+5. Some machines are different, one example is how many registers are in the machine. Code that relies on certain registers will not work on a computer with a different register setup. By creating a separation, much of the code would no longer depend on the machine, and the parts that are can be easily isolated and changed.
+
+6. as seen in kern/arch/mips/include/trapframe.h, the trapframe struct has 37 uint32_ts (starting at line 41 and ending at line 77), which works out to 37*4=148 bytes. It is this big so that it can store the values in all 37 registers for the exeption handler.
+
+7. In kern/conf/conf.kern it states kern/conf/conf.kern: To add new files to the system, you need to edit this file (or others like it) and rerun the config script. So you should rerun it when adding new files.
+
+8. After you configure DUMBVM, or change the header file inclusions.
+
+9. Whenever you need to recompile the kernel. 
+
+10. In kern/main/menu.c you would have to make the function, then add it to the cmdtable array. You could also display it in the menu by adding it to the opsmenu or mainmenu or whichever array, but I don't think that's necessary.
+
+11. it is on a virtual machine that has mips hardware, and thus does not know to the proper functions for "ls"ing in said hardware, for example.
+
+12. the code in userland/lib/crt0/mips/crt0.S regains control when main returns. It puts the return value of main in registers v0, s0 and then a0.
+
+13. we would have to add the syscall and a call number to kern/include/kern/syscall.h, add the function prototype to kern/include/syscall.h, add the code for the function in the file kern/syscall, and add it to the case statement in kern/arch/mips/syscall/syscall.c. Since we added a new file, we need to re-run the kern/conf/config script, which means we need to re-run bmake depend as well. Then we need to rebuild and install the kernel.
+
+14. boot() in kmain which does kprintf("\n");
