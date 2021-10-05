@@ -252,7 +252,7 @@ cv_wait(struct cv *cv, struct lock *lock)
 
 	spinlock_acquire(&cv->cv_lock);
 
-        //atomically suspend the current thread and unlock the lock
+        //unlocks the lock and suspends the current thread
         lock_release(lock);
         wchan_sleep(cv->cv_wchan, &cv->cv_lock);
 
