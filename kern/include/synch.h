@@ -76,8 +76,6 @@ struct lock {
         char *lk_name;
         struct semaphore *locksem;
         bool hold;
-        // add what you need here
-        // (don't forget to mark things volatile as needed)
 };
 
 struct lock *lock_create(const char *name);
@@ -117,8 +115,6 @@ struct cv {
         char *cv_name;
         struct wchan *cv_wchan;
         struct spinlock cv_lock;
-        // add what you need here
-        // (don't forget to mark things volatile as needed)
 };
 
 struct cv *cv_create(const char *name);
