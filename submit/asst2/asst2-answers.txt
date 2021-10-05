@@ -1,0 +1,26 @@
+1. by looking at kern/thread/thread.c, we see when a thread exits it detaches from its current process, and verifies it is indeed detached. It then checks the stack guard band, then turns interrupt off on the processor. Finally, it puts the thread in the zombie state.
+wchan_sleep makes sure it's not sleeping on the interrupt handler, and that the thread is holding a spinlock, and only one spinlock. The tread then goes to sleep on the wait channel, yielding the processor to another thread. Once it wakes up, it will acquire the lock.
+
+2. the code in thread_switch in kern/thread/thread.c handles context switching
+
+3.
+S_READY. being ready means the thread is not yet running but is ready to run
+S_ZOMBIE. being in the zombie state means the thread has exited but still needs to have thread_destroy called on it
+S_RUN. this means the thread is running
+S_SLEEP. this means the thread is queued on the wait channel
+
+4. Disabling interrupts ensures that no other processes can mess up what you're doing, making sure you stay on the current thread. It is done using splhigh(). It is important in this code because we should not be interrupted while context switching, otherwise bad things could happen!
+
+5. wchan_wakeone grabs one thread from the wait channel with threadlist_remhead and calls thread_make_runnable on it. thread_make_runnable locks the run queue of the target thread's cpu, and checks if it already has the lock. If it does, it verifies this, and if it doesn't it acquires it. Then the thread is put on the run queue. If the target cpu is idle, it makes it unidle by sending an interrupt. It will run once a context switch is called, and it gets taken off the queue.
+
+6. threadlist_remhead will look for the next thread in the run queue
+
+7. It gets the first thread in the queue
+
+8. the timer will periodically cause schedule() to be called, which is supposed to reorganize the cpu's run queue in order of priority. It can also cause thread_consider_migration to be called, which might move threads to less busy cpus if the current cpu is busy
+The hardware interrupt calls hardclock, in kern/thread/clock.c. it is called a specified CPU HZ times a second, and will call the two functions mentioned above, then yield. 
+
+9. for the function P in kern/thread/synch.c, the function calls wchan_sleep while the current semaphore count is 0. If the count is not 0, it decrements the count by 1. For the function V, wchan_wakeone is called, and after it makes sure the semaphore count is greater than 0, it wakes a thread that was waiting for the semaphore.
+This helps in the implementation of a semaphore in that we ensure only a specified amount of threads to run. If we are over that limit, we put them to sleep to wait until we are within the specified amount. Once we are done, we allow another thread to run.
+
+10. In the function that does the switching, thread_switch, we see that when a thread is added to the wait channel, the wchan's spinlock is only unlocked after the thread is added to the list. This ensures no other threads can access the wchan while the thread is being put to sleep, and so there is no race with other threads calling wake.

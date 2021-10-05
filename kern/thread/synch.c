@@ -154,7 +154,9 @@ lock_create(const char *name)
                 return NULL;
         }
 
-        // add stuff here as needed
+        lock->locksem = sem_create("locksem", 1);
+
+        lock->hold = false;
 
         return lock;
 }
@@ -164,7 +166,7 @@ lock_destroy(struct lock *lock)
 {
         KASSERT(lock != NULL);
 
-        // add stuff here as needed
+	sem_destroy(lock->locksem);
 
         kfree(lock->lk_name);
         kfree(lock);
@@ -173,27 +175,27 @@ lock_destroy(struct lock *lock)
 void
 lock_acquire(struct lock *lock)
 {
-        // Write this
+        KASSERT(lock != NULL);
 
-        (void)lock;  // suppress warning until code gets written
+        //decrement the semaphore
+        P(lock->locksem);
+        lock->hold = true;
 }
 
 void
 lock_release(struct lock *lock)
 {
-        // Write this
+        KASSERT(lock != NULL);
 
-        (void)lock;  // suppress warning until code gets written
+        //increment the semaphore
+        V(lock->locksem);
+        lock->hold = false;
 }
 
 bool
 lock_do_i_hold(struct lock *lock)
 {
-        // Write this
-
-        (void)lock;  // suppress warning until code gets written
-
-        return true; // dummy until code gets written
+        return lock->hold;
 }
 
 ////////////////////////////////////////////////////////////
@@ -217,7 +219,14 @@ cv_create(const char *name)
                 return NULL;
         }
 
-        // add stuff here as needed
+        cv->cv_wchan = wchan_create(cv->cv_name);
+	if (cv->cv_wchan == NULL) {
+		kfree(cv->cv_name);
+		kfree(cv);
+		return NULL;
+	}
+
+        spinlock_init(&cv->cv_lock);
 
         return cv;
 }
@@ -227,7 +236,9 @@ cv_destroy(struct cv *cv)
 {
         KASSERT(cv != NULL);
 
-        // add stuff here as needed
+        //wchan_cleanup will assert if anyone's waiting on it
+        spinlock_cleanup(&cv->cv_lock);
+	wchan_destroy(cv->cv_wchan);
 
         kfree(cv->cv_name);
         kfree(cv);
@@ -236,23 +247,49 @@ cv_destroy(struct cv *cv)
 void
 cv_wait(struct cv *cv, struct lock *lock)
 {
-        // Write this
-        (void)cv;    // suppress warning until code gets written
-        (void)lock;  // suppress warning until code gets written
+        KASSERT(cv != NULL);
+        KASSERT(lock != NULL);
+
+	spinlock_acquire(&cv->cv_lock);
+
+        //atomically suspend the current thread and unlock the lock
+        lock_release(lock);
+        wchan_sleep(cv->cv_wchan, &cv->cv_lock);
+
+        spinlock_release(&cv->cv_lock);
+
+        //when the thread resumes execution it re-locks the lock
+        lock_acquire(lock);
 }
+
 
 void
 cv_signal(struct cv *cv, struct lock *lock)
 {
-        // Write this
-	(void)cv;    // suppress warning until code gets written
-	(void)lock;  // suppress warning until code gets written
+        KASSERT(cv != NULL);
+        KASSERT(lock != NULL);
+
+        spinlock_acquire(&cv->cv_lock);
+        //if there is at least one thread enqueued on the wait channel then one such thread is dequeued and allowed to resume execution
+        if (!wchan_isempty(cv->cv_wchan, &cv->cv_lock)) 
+        {
+                wchan_wakeone(cv->cv_wchan, &cv->cv_lock);
+        }
+        spinlock_release(&cv->cv_lock);
 }
+
 
 void
 cv_broadcast(struct cv *cv, struct lock *lock)
 {
-	// Write this
-	(void)cv;    // suppress warning until code gets written
-	(void)lock;  // suppress warning until code gets written
+        KASSERT(cv != NULL);
+        KASSERT(lock != NULL);
+
+        spinlock_acquire(&cv->cv_lock);
+        //if there are any threads enqueued on the wait channel then all such threads are allowed to resume execution
+        if (!wchan_isempty(cv->cv_wchan, &cv->cv_lock)) 
+        {
+                wchan_wakeall(cv->cv_wchan, &cv->cv_lock);
+        }
+        spinlock_release(&cv->cv_lock);
 }
