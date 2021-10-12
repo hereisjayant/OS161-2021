@@ -90,7 +90,7 @@ struct cv* cond_thread;
  * 
  * the main waits on a condition variable.
  * 
- * all of these will exit after the amount of ropes is 0. just before it exits, it will
+ * all of these (except main) will exit after the amount of ropes is 0. just before it exits, it will
  * decrease the amount of threads running. Once the thread running count is 1, the
  * penultimate thread will signal main thread to wake, and so the main thread
  * will know all the other threads are done.
