@@ -137,7 +137,91 @@ V(struct semaphore *sem)
 ////////////////////////////////////////////////////////////
 //
 // Lock.
+struct lock *
+lock_create(const char *name)
+{
+        struct lock *lock;
 
+        lock = kmalloc(sizeof(struct lock));
+        if (lock == NULL) {
+                return NULL;
+        }
+
+        lock->lk_name = kstrdup(name);
+        if (lock->lk_name == NULL) {
+                kfree(lock);
+                return NULL;
+        }
+
+	lock->lk_wchan = wchan_create(lock->lk_name);
+	if (lock->lk_wchan == NULL) {
+		kfree(lock->lk_name);
+		kfree(lock);
+		return NULL;
+	}
+	spinlock_init(&lock->lk_lock);
+	lock->lk_holder = NULL;
+
+        return lock;
+}
+
+void
+lock_destroy(struct lock *lock)
+{
+        KASSERT(lock != NULL);
+
+	KASSERT(lock->lk_holder == NULL);
+	spinlock_cleanup(&lock->lk_lock);
+	wchan_destroy(lock->lk_wchan);
+
+        kfree(lock->lk_name);
+        kfree(lock);
+}
+
+void
+lock_acquire(struct lock *lock)
+{
+	DEBUGASSERT(lock != NULL);
+        KASSERT(curthread->t_in_interrupt == false);
+
+	spinlock_acquire(&lock->lk_lock);
+	KASSERT(lock->lk_holder != curthread);
+	while (lock->lk_holder != NULL) {
+		/* As in the semaphore. */
+                wchan_sleep(lock->lk_wchan, &lock->lk_lock);
+	}
+
+	lock->lk_holder = curthread;
+	spinlock_release(&lock->lk_lock);
+}
+
+void
+lock_release(struct lock *lock)
+{
+	DEBUGASSERT(lock != NULL);
+
+	spinlock_acquire(&lock->lk_lock);
+	KASSERT(lock->lk_holder == curthread);
+	lock->lk_holder = NULL;
+	wchan_wakeone(lock->lk_wchan, &lock->lk_lock);
+	spinlock_release(&lock->lk_lock);
+}
+
+bool
+lock_do_i_hold(struct lock *lock)
+{
+	bool ret;
+
+	DEBUGASSERT(lock != NULL);
+
+	spinlock_acquire(&lock->lk_lock);
+	ret = (lock->lk_holder == curthread);
+	spinlock_release(&lock->lk_lock);
+
+        return ret;
+}
+
+/*
 struct lock *
 lock_create(const char *name)
 {
@@ -197,6 +281,7 @@ lock_do_i_hold(struct lock *lock)
 {
         return lock->hold;
 }
+*/
 
 ////////////////////////////////////////////////////////////
 //
