@@ -1,0 +1,1880 @@
+Diff from os161-filesyscalls-1.99.08 to os161-procsyscalls-1.99.08.
+To apply, run patch -p1 < thispatchfile in the top level directory
+of the OS/161 tree.
+
+diff -r c068f74d7670 -r 49d28958de6a CHANGES.syscalls
+--- a/CHANGES.syscalls	Wed Sep 24 21:07:31 2014 -0400
++++ b/CHANGES.syscalls	Wed Sep 24 21:09:36 2014 -0400
+@@ -20,11 +20,15 @@
+ 20140822 dholland	Split file.h -> openfile.h and filetable.h.
+ 
+ 20140123 dholland	Version 1.99.07 of the system calls solutions released.
++20140122 dholland	Mark sys__exit() __DEAD.
++20140122 dholland	waitpid now allows the status arg to be null.
+ 20130531 dholland	Adjust to base system addition of struct proc.
++20100108 dholland	Split out design notes for process syscalls.
+ 20100108 dholland	Split out design notes for file syscalls.
+ 20100108 dholland	Split out design notes for filetables.
+ 20100106 dholland	Split solution code into filetables, filesyscalls,
+ 			procsyscalls, exec, and scheduling patches.
++20090424 dholland	Fix crash caused by waking up parents too early.
+ 
+ 20090414 dholland	sol2-1.99.04 released.
+ 20090402 dholland	sol2-1.99.03 released.
+@@ -38,6 +42,7 @@
+ 20050913 dholland	sol2-1.11 released.
+ 
+ 20040203 dholland	sol2-1.10 released.
++20040203 dholland	Move a block comment (about wait) where it belongs.
+ 
+ 20031227 dholland	sol2-1.09 released.
+ 20030626 dholland	Minor include fixes.
+@@ -45,6 +50,8 @@
+ 
+ 20030310 dholland	sol2-1.08 released. (1.07 skipped.)
+ 20030309 dholland	Fix read and write syscalls to check O_RDONLY et al.
++20030309 dholland	Add support for WNOHANG.
++20030309 dholland	New wait/exit code again.
+ 20030129 dholland	Add prefix to struct filetable members for consistency.
+ 20030129 dholland	Add prefix to struct openfile members for consistency.
+ 
+@@ -53,12 +60,17 @@
+ 
+ 20020917 dholland	sol2-1.05 released.
+ 20020916 dholland	Created this changelog from CVS log data.
++20020904 dholland	Fix bug in pid code.
++20020830 dholland	Use BOOTUP_PID instead of magic value 1.
+ 20020328 dholland	Fix missing lock_release calls on error.
+ 
+ 20020309 dholland	sol2-1.04 released.
+ 20020309 dholland	Design docs for sol2.
++20020308 dholland	New wait/exit code.
+ 20020307 dholland	Various fixes.
++20010619 dholland	Add fork implementation pursuant to asst2 changes.
+ 20010618 dholland	Various fixes and cleanup.
++20010611 dholland	Fix leaks in thread_fork.
+ 20010528 blackman	Bug fix.
+ 
+ 20010320 blackman	sol2-2001 released.
+@@ -66,7 +78,7 @@
+ 
+ 20010315 blackman	sol2-2001-buggy released.
+ 20010315 blackman	Bug fixes.
+-20010314 blackman	Cleanup and commenting.
++20010314 blackman	Cleanup and commenting; waitpid test code.
+ 20010313 blackman	New sol2 code, including parts of the original code.
+ 20010312 blackman	Back out the previous sol2 code.
+ 20010224 dholland	Bug fixes.
+diff -r c068f74d7670 -r 49d28958de6a design/procsyscalls.txt
+--- /dev/null	Thu Jan 01 00:00:00 1970 +0000
++++ b/design/procsyscalls.txt	Wed Sep 24 21:09:36 2014 -0400
+@@ -0,0 +1,212 @@
++Design notes for process system calls (part of the system call solution set)
++----------------------------------------------------------------------------
++
++This part of the solution set covers the following:
++
++   - Process calls other than execv: getpid, waitpid, _exit, fork
++   - kill_curthread
++
++Process-related support
++-----------------------
++
++   The design assumes single-threaded processes, and that if
++multithreaded processes are to be added later, they will be supported
++by having multiple single-threaded processes (each with its own
++process id) sharing address spaces, filetables, and whatnot. Thus
++there is no "process" structure, just threads. Thus the terms "thread"
++and "process" are herein used more or less synonymously.
++
++   The thread structure gains only two new fields (and four more for
++handling priority information if the pqsched scheduler is in use; see
++below.) These fields are the file table, as described above, and the
++process id.
++
++   The process-id management code is entirely encapsulated in the new
++file thread/pid.c, whose header file is include/pid.h. The process ids
++0 and 1 are reserved; 0 is invalid, and 1 is reserved for the bootup
++process. Values from 2 (PID_MIN) through and including 32767 (PID_MAX)
++may be assigned to other processes.
++
++   The process-id management code uses an array of pointers to process
++info structures. These structures, struct pidinfo, contain the
++following members:
++	pi_pid		Process id of this process
++	pi_ppid		Process id of this process's parent
++	pi_exited	True if thread has exited
++	pi_exitstatus	Exit code (only valid if pi_exited!=0)
++	pi_cv		Condition variable for waiting for exit
++
++   In addition, there is one global lock for the entire pid management
++system (pidlock), a variable to hold the current candidate for next
++process id, and a counter for the current number of processes
++existing.
++
++   Process id allocation is fundamentally sequential, looping back to
++PID_MIN after PID_MAX is reached. This is significant: it is important
++not to reuse process ids very quickly (at least on the order of
++seconds, preferably minutes.) There are two reasons to be careful with
++this: first, on a system that uses pids for referring to processes, as
++most eventually do in some way or other (consider "kill" in Unix), if
++you reuse a pid too quickly someone might issue a kill and get the
++wrong process. Second, a lot of code in the real world assumes that
++the pair (getpid(), time(NULL)) uniquely identifies a process on a
++system; this pair is often used to generate unique IDs for various
++application-level protocols.
++
++   The process table is a fly-by-night hash table. The hash function
++is the pid modulo the table size, which is PROCS_MAX (presently 128,
++defiend in include/kern/limits.h.) Each slot may hold only one
++process; when allocating pids, if the next pid would hash to a slot
++that's already in use, we just don't use that pid and try the next one
++instead. This limits the maximum number of processes on the system at
++once to 128. This is more than the number of processes that will fit
++in kernel memory under the assignment 3 memory restrictions (at 4k per
++kernel thread stack, at most 128 processes at once will fit in the
++512k of memory at once, and some memory will be used for other
++things.) So this limit should be ample for CS161 use. The limit can be
++raised if desired; also, it would not be difficult to change the
++process table to allow resizing and rehashing.
++
++   The "interest" model used in the wait/exit code is that (per the
++specification) a parent process is always interested in the child
++processes it forks, and nobody else may be. (However, when kernel
++threads are created with thread_fork, if the pid return argument is
++NULL, it is assumed that the parent is actually not interested; this
++feature is only used by certain kernel thread forks, mostly in test
++code.) The parent process id is recorded in the pidinfo structure.
++
++   When a process exits, any pidinfo structures that list that process
++as the parent process have their parent process id set to INVALID_PID.
++When a pidinfo structure records both that its thread has exited (in
++the pi_exited member) and that its parent has exited or disowned it in
++this fashion, the pidinfo structure is removed and freed. Note that
++this can happen when either the parent or the child exits.
++
++   When the parent collects the child's exit status, the parent
++process id is also set to INVALID_PID, likewise allowing the pidinfo
++structure to be freed.
++
++   The actual process syscalls live in the new file
++userprog/proc_syscalls.c.
++
++
++getpid
++------
++   getpid just hands back curthread->pid.
++
++waitpid
++-------
++   The sys_waitpid function itself doesn't do anything besides copying
++the results out to userspace. The work is done by the function it
++calls: pid_wait() in thread/pid.c.
++
++   pid_wait() first checks for some basic error cases (note that
++processes may not wait for themselves...) and then gets the pid data
++lock. This allows it to fetch the pidinfo for the requested process;
++if it doesn't exist, or isn't a child of the current process, it
++returns an error.
++
++   Now it checks if the target hasn't exited yet. If so, and WNOHANG
++was used, it returns. If WNOHANG wasn't used, it waits. It doesn't
++loop on the CV, because there's no need: once the child exits, nothing
++can cause it to come back to life and cause the condition we wanted to
++wait for (exiting) to become false again.
++
++   Then it fetches the status, and finally calls pi_drop to free the
++pidinfo structure and release the process table slot.
++
++   We updated the menu code for running user programs (both the `p'
++and `s' commands) to call pid_wait(). This causes the menu system to
++wait for its subprocess to exit before printing another prompt.
++
++   There's a new test ("wt") for testing the pid_wait code from kernel
++level. This test lives in the new file test/waittest.c.
++
++
++_exit
++-----
++   sys__exit does nothing besides call thread_exit.
++
++   thread_exit has been modified so that it takes the process exit
++status as an argument. This status is immediately handed off to
++pid_setexitstatus().
++
++   pid_setexitstatus is the pid-management portion of exit. It first
++disowns all children by setting the parent pid field of their pidinfo
++structs to 0. (This may cause those pidinfo structs to be reclaimed.)
++
++   It then records its exit status; if the parent still exists, it
++broadcasts on the cv; if not, it calls pi_drop to free the pidinfo
++structure and release the process table slot.
++
++   thread_exit also now cleans up the current thread's file table.
++
++
++fork
++----
++   sys_fork itself takes care of the trapframe handling. The rest of
++the work is done by thread_fork and its related functions.
++
++   The trapframe for the new thread must live on the new thread's
++stack. Since we don't want to muck with the thread creation code to
++copy it directly onto the new stack (although this is possible), we
++pass it to the new thread. To avoid synchronization problems, we copy
++it twice: first in sys_fork we copy the parent thread's trapframe into
++a trapframe allocated with kmalloc. Then we pass this pointer through
++thread_fork to where the new thread starts, a function child_thread()
++in proc_syscalls.c. This function kfrees the pointer it's passed after
++first copying it into *another* trapframe on its stack. This final
++trapframe can then be passed to md_forkentry without making a mess.
++
++   md_forkentry is the machine-dependent function that adjusts the
++child process's trapframe for return from fork() and jumps to
++userlevel. There are three things it needs to do before calling
++mips_usermode: set the return value register to 0, set the
++error-return flag register to 0, and advance the program counter.
++
++
++fork-related thread changes
++---------------------------
++   thread_create now initializes the new thread fields. The process id
++is initialized to INVALID_PID, and the filetable is initialized to
++NULL. These are set for real in thread_fork. thread_destroy
++correspondingly assumes/asserts that the filetable and process id get
++cleaned up in thread_exit.
++
++   The boot sequence now calls pid_bootstrap, the pid management
++code's setup function. cpu_create() now also allocates a pid for the
++first thread on each cpu, using the reserved BOOT_PID (1) on the first
++cpu (and thus the first thread) because pid_alloc can't yet be called.
++
++   thread_fork has been modified so that instead of handing back the
++thread structure of the child thread (which is difficult to use
++correctly, as noted in comments in the original thread.c, because the
++child thread might exit before the parent thread finishes returning
++from thread_fork) it hands back the process id of the new thread.
++
++   In addition it now allocates a pid for the new thread and copies
++the new process-related phenomena (file table, address space) into the
++new thread. An optimization is performed: it's assumed that if the
++caller does not want to know what the pid was, the new thread must be
++intended to be a kernel thread and doesn't need a file table or
++address space. Furthermore, if the caller doesn't want to know the
++pid, it assumes that the caller must not want to wait for the child,
++so the child is automatically disowned using pid_disown().
++
++   The order of copying in thread_fork was chosen in order to minimize
++the hassle associated with cleaning up on failure - a lot of things
++might have to be undone on failure and some of them are not so easy to
++undo. For instance, there's a special function in the process id code,
++pid_unalloc, that undoes pid_alloc without requiring that the new
++thread actually run.
++
++
++kill_curthread
++--------------
++
++   With the various changes for waitpid and _exit, all this needs to
++do is call thread_exit(). We build a suitable exit status from the
++signal number already chosen.
++
++
++
+diff -r c068f74d7670 -r 49d28958de6a kern/arch/mips/locore/trap.c
+--- a/kern/arch/mips/locore/trap.c	Wed Sep 24 21:07:31 2014 -0400
++++ b/kern/arch/mips/locore/trap.c	Wed Sep 24 21:09:36 2014 -0400
+@@ -28,6 +28,7 @@
+  */
+ 
+ #include <types.h>
++#include <kern/wait.h>
+ #include <signal.h>
+ #include <lib.h>
+ #include <mips/specialreg.h>
+@@ -35,6 +36,7 @@
+ #include <cpu.h>
+ #include <spl.h>
+ #include <thread.h>
++#include <proc.h>
+ #include <current.h>
+ #include <vm.h>
+ #include <mainbus.h>
+@@ -108,13 +110,19 @@
+ 		break;
+ 	}
+ 
+-	/*
+-	 * You will probably want to change this.
+-	 */
+-
++	/* For now, keep the message; it can be useful when debugging. */
+ 	kprintf("Fatal user mode trap %u sig %d (%s, epc 0x%x, vaddr 0x%x)\n",
+ 		code, sig, trapcodenames[code], epc, vaddr);
+-	panic("I don't know how to handle this\n");
++
++	/*
++	 * Call proc_exit, creating an exit status that reflects the
++	 * signal number we died on. Since we don't implement core
++	 * dumps, we don't ever use _MKWAIT_CORE().
++	 */
++	proc_exit(_MKWAIT_SIG(sig));
++
++	/* Now, the thread can go away too. */
++	thread_exit();
+ }
+ 
+ /*
+diff -r c068f74d7670 -r 49d28958de6a kern/arch/mips/syscall/syscall.c
+--- a/kern/arch/mips/syscall/syscall.c	Wed Sep 24 21:07:31 2014 -0400
++++ b/kern/arch/mips/syscall/syscall.c	Wed Sep 24 21:09:36 2014 -0400
+@@ -114,6 +114,29 @@
+ 		break;
+ 
+ 
++	    /* process calls */
++
++	    case SYS_fork:
++		err = sys_fork(tf, &retval);
++		break;
++
++	    case SYS__exit:
++		sys__exit(tf->tf_a0);
++		panic("Returning from exit\n");
++
++	    case SYS_waitpid:
++		err = sys_waitpid(
++			tf->tf_a0,
++			(userptr_t)tf->tf_a1,
++			tf->tf_a2,
++			&retval);
++		break;
++
++	    case SYS_getpid:
++		err = sys_getpid(&retval);
++		break;
++
++
+ 	    /* file calls */
+ 
+ 	    case SYS_open:
+@@ -235,13 +258,18 @@
+ /*
+  * Enter user mode for a newly forked process.
+  *
+- * This function is provided as a reminder. You need to write
+- * both it and the code that calls it.
+- *
+- * Thus, you can trash it and do things another way if you prefer.
++ * Succeed and return 0 into userspace.
+  */
+ void
+ enter_forked_process(struct trapframe *tf)
+ {
+-	(void)tf;
++	tf->tf_v0 = 0;
++	tf->tf_a3 = 0;
++
++	/*
++	 * Advance the PC.
++	 */
++	tf->tf_epc += 4;
++
++	mips_usermode(tf);
+ }
+diff -r c068f74d7670 -r 49d28958de6a kern/conf/conf.kern
+--- a/kern/conf/conf.kern	Wed Sep 24 21:07:31 2014 -0400
++++ b/kern/conf/conf.kern	Wed Sep 24 21:09:36 2014 -0400
+@@ -331,6 +331,7 @@
+ #
+ 
+ file      proc/proc.c
++file      proc/pid.c
+ 
+ #
+ # Virtual memory system
+@@ -378,6 +379,7 @@
+ file      syscall/openfile.c
+ file      syscall/runprogram.c
+ file      syscall/file_syscalls.c
++file      syscall/proc_syscalls.c
+ file      syscall/time_syscalls.c
+ 
+ #
+@@ -431,6 +433,9 @@
+ #                                      #
+ ########################################
+ 
++# For testing the wait implementation.
++file		test/waittest.c
++
+ file		test/arraytest.c
+ file		test/bitmaptest.c
+ file		test/threadlisttest.c
+diff -r c068f74d7670 -r 49d28958de6a kern/include/kern/limits.h
+--- a/kern/include/kern/limits.h	Wed Sep 24 21:07:31 2014 -0400
++++ b/kern/include/kern/limits.h	Wed Sep 24 21:09:36 2014 -0400
+@@ -85,6 +85,9 @@
+ /* Max bytes for atomic pipe I/O -- see description in the pipe() man page */
+ #define __PIPE_BUF      512
+ 
++/* Max number of processes at once. */
++#define __PROCS_MAX       128
++
+ 
+ /*
+  * Not so important parts of the API. (Especially in OS/161 where we
+diff -r c068f74d7670 -r 49d28958de6a kern/include/limits.h
+--- a/kern/include/limits.h	Wed Sep 24 21:07:31 2014 -0400
++++ b/kern/include/limits.h	Wed Sep 24 21:09:36 2014 -0400
+@@ -44,6 +44,7 @@
+ #define PID_MIN         __PID_MIN
+ #define PID_MAX         __PID_MAX
+ #define PIPE_BUF        __PIPE_BUF
++#define PROCS_MAX       __PROCS_MAX
+ #define NGROUPS_MAX     __NGROUPS_MAX
+ #define LOGIN_NAME_MAX  __LOGIN_NAME_MAX
+ #define OPEN_MAX        __OPEN_MAX
+diff -r c068f74d7670 -r 49d28958de6a kern/include/pid.h
+--- /dev/null	Thu Jan 01 00:00:00 1970 +0000
++++ b/kern/include/pid.h	Wed Sep 24 21:09:36 2014 -0400
+@@ -0,0 +1,74 @@
++/*
++ * Copyright (c) 2000, 2001, 2002, 2003, 2004, 2005, 2008, 2009
++ *	The President and Fellows of Harvard College.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. Neither the name of the University nor the names of its contributors
++ *    may be used to endorse or promote products derived from this software
++ *    without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE UNIVERSITY AND CONTRIBUTORS ``AS IS'' AND
++ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ * ARE DISCLAIMED.  IN NO EVENT SHALL THE UNIVERSITY OR CONTRIBUTORS BE LIABLE
++ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
++ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
++ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
++ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
++ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
++ * SUCH DAMAGE.
++ */
++
++/*
++ * Process ID managment.
++ */
++
++#ifndef _PID_H_
++#define _PID_H_
++
++
++#define INVALID_PID	0	/* nothing has this pid */
++#define KERNEL_PID	1	/* kernel proc has this pid */
++
++/*
++ * Initialize pid management.
++ */
++void pid_bootstrap(void);
++
++/*
++ * Get a pid for a new thread.
++ */
++int pid_alloc(pid_t *retval);
++
++/*
++ * Undo pid_alloc (may blow up if the target has ever run)
++ */
++void pid_unalloc(pid_t targetpid);
++
++/*
++ * Disown a pid (abandon interest in its exit status)
++ */
++void pid_disown(pid_t targetpid);
++
++/*
++ * Set the exit status of the current thread to status.  Wakes up any threads
++ * waiting to read this status, and decrefs the current thread's pid.
++ */
++void pid_setexitstatus(int status);
++
++/*
++ * Causes the current thread to wait for the thread with pid PID to
++ * exit, returning the exit status when it does.
++ */
++int pid_wait(pid_t targetpid, int *status, int flags, pid_t *retpid);
++
++
++#endif /* _PID_H_ */
+diff -r c068f74d7670 -r 49d28958de6a kern/include/proc.h
+--- a/kern/include/proc.h	Wed Sep 24 21:07:31 2014 -0400
++++ b/kern/include/proc.h	Wed Sep 24 21:09:36 2014 -0400
+@@ -49,6 +49,7 @@
+ 	char *p_name;			/* Name of this process */
+ 	struct spinlock p_lock;		/* Lock for this structure */
+ 	struct threadarray p_threads;	/* Threads in this process */
++	pid_t p_pid;			/* Process ID */
+ 
+ 	/* VM */
+ 	struct addrspace *p_addrspace;	/* virtual address space */
+@@ -67,14 +68,26 @@
+ void proc_bootstrap(void);
+ 
+ /* Create a fresh process for use by runprogram(). */
+-struct proc *proc_create_runprogram(const char *name);
++int proc_create_runprogram(const char *name, struct proc **ret);
+ 
+ /* Create a fresh process for use by fork() */
+ int proc_fork(struct proc **ret);
+ 
++/* Undo proc_fork if nothing's run in the new process yet. */
++void proc_unfork(struct proc *proc);
++
+ /* Destroy a process. */
+ void proc_destroy(struct proc *proc);
+ 
++/*
++ * Cause the current process to exit. The current thread switches
++ * itself into the kernel process.
++ *
++ * The status code should be prepared with one of the _MKWAIT macros
++ * defined in <kern/wait.h>.
++ */
++void proc_exit(int status);
++
+ /* Attach a thread to a process. Must not already have a process. */
+ int proc_addthread(struct proc *proc, struct thread *t);
+ 
+diff -r c068f74d7670 -r 49d28958de6a kern/include/syscall.h
+--- a/kern/include/syscall.h	Wed Sep 24 21:07:31 2014 -0400
++++ b/kern/include/syscall.h	Wed Sep 24 21:09:36 2014 -0400
+@@ -62,6 +62,11 @@
+ int sys_reboot(int code);
+ int sys___time(userptr_t user_seconds, userptr_t user_nanoseconds);
+ 
++int sys_fork(struct trapframe *tf, pid_t *retval);
++__DEAD void sys__exit(int code);
++int sys_waitpid(pid_t pid, userptr_t returncode, int flags, pid_t *retval);
++int sys_getpid(pid_t *retval);
++
+ int sys_open(const_userptr_t filename, int flags, mode_t mode, int *retval);
+ int sys_dup2(int oldfd, int newfd, int *retval);
+ int sys_close(int fd);
+diff -r c068f74d7670 -r 49d28958de6a kern/include/test.h
+--- a/kern/include/test.h	Wed Sep 24 21:07:31 2014 -0400
++++ b/kern/include/test.h	Wed Sep 24 21:09:36 2014 -0400
+@@ -40,6 +40,9 @@
+  * Test code.
+  */
+ 
++/* For testing the wait implementation. */
++int waittest(int, char **);
++
+ /* data structure tests */
+ int arraytest(int, char **);
+ int bitmaptest(int, char **);
+diff -r c068f74d7670 -r 49d28958de6a kern/main/main.c
+--- a/kern/main/main.c	Wed Sep 24 21:07:31 2014 -0400
++++ b/kern/main/main.c	Wed Sep 24 21:09:36 2014 -0400
+@@ -46,6 +46,7 @@
+ #include <mainbus.h>
+ #include <vfs.h>
+ #include <device.h>
++#include <pid.h>
+ #include <syscall.h>
+ #include <test.h>
+ #include <version.h>
+@@ -98,7 +99,7 @@
+ 
+ 	kprintf("\n");
+ 	kprintf("OS/161 base system version %s\n", BASE_VERSION);
+-	kprintf("(with locks/CVs, file system calls solutions)\n");
++	kprintf("(with locks/CVs, file/proc system calls solutions)\n");
+ 	kprintf("%s", harvard_copyright);
+ 	kprintf("\n");
+ 
+@@ -110,6 +111,7 @@
+ 	ram_bootstrap();
+ 	proc_bootstrap();
+ 	thread_bootstrap();
++	pid_bootstrap();
+ 	hardclock_bootstrap();
+ 	vfs_bootstrap();
+ 	kheap_nextgeneration();
+diff -r c068f74d7670 -r 49d28958de6a kern/main/menu.c
+--- a/kern/main/menu.c	Wed Sep 24 21:07:31 2014 -0400
++++ b/kern/main/menu.c	Wed Sep 24 21:09:36 2014 -0400
+@@ -31,6 +31,7 @@
+ #include <kern/errno.h>
+ #include <kern/reboot.h>
+ #include <kern/unistd.h>
++#include <kern/wait.h>
+ #include <limits.h>
+ #include <lib.h>
+ #include <uio.h>
+@@ -39,6 +40,7 @@
+ #include <proc.h>
+ #include <vfs.h>
+ #include <sfs.h>
++#include <pid.h>
+ #include <syscall.h>
+ #include <test.h>
+ #include "opt-sfs.h"
+@@ -87,26 +89,18 @@
+ 	strcpy(progname, args[0]);
+ 
+ 	result = runprogram(progname);
+-	if (result) {
+-		kprintf("Running program %s failed: %s\n", args[0],
+-			strerror(result));
+-		return;
+-	}
+ 
+-	/* NOTREACHED: runprogram only returns on error. */
++	/* runprogram only returns on error. */
++	KASSERT(result != 0);
++
++	kprintf("Running program %s failed: %s\n", args[0],
++		strerror(result));
++	proc_exit(_MKWAIT_EXIT(1));
++	thread_exit();
+ }
+ 
+ /*
+  * Common code for cmd_prog and cmd_shell.
+- *
+- * Note that this does not wait for the subprogram to finish, but
+- * returns immediately to the menu. This is usually not what you want,
+- * so you should have it call your system-calls-assignment waitpid
+- * code after forking.
+- *
+- * Also note that because the subprogram's thread uses the "args"
+- * array and strings, until you do this a race condition exists
+- * between that code and the menu input code.
+  */
+ static
+ int
+@@ -114,12 +108,15 @@
+ {
+ 	struct proc *proc;
+ 	int result;
++	pid_t childpid;
++	int status;
+ 
+ 	/* Create a process for the new program to run in. */
+-	proc = proc_create_runprogram(args[0] /* name */);
+-	if (proc == NULL) {
+-		return ENOMEM;
++	result = proc_create_runprogram(args[0] /* name */, &proc);
++	if (result) {
++		return result;
+ 	}
++	childpid = proc->p_pid;
+ 
+ 	result = thread_fork(args[0] /* thread name */,
+ 			proc /* new process */,
+@@ -131,10 +128,19 @@
+ 		return result;
+ 	}
+ 
+-	/*
+-	 * The new process will be destroyed when the program exits...
+-	 * once you write the code for handling that.
+-	 */
++	pid_wait(childpid, &status, 0, NULL);
++	if (WIFEXITED(status)) {
++		kprintf("Program (pid %d) exited with status %d\n",
++			childpid, WEXITSTATUS(status));
++	}
++	else if (WIFSIGNALED(status)) {
++		kprintf("Program (pid %d) exited with signal %d\n",
++			childpid, WTERMSIG(status));
++	}
++	else {
++		panic("Program (pid %d) gave strange exit status %d\n",
++		      childpid, status);
++	}
+ 
+ 	return 0;
+ }
+@@ -475,6 +481,7 @@
+ 	"[sy2] Lock test                     ",
+ 	"[sy3] CV test                       ",
+ 	"[sy4] CV test #2                    ",
++	"[wt]  waitpid test                  ",
+ 	"[fs1] Filesystem test               ",
+ 	"[fs2] FS read stress                ",
+ 	"[fs3] FS write stress               ",
+@@ -574,6 +581,10 @@
+ 	{ "sy3",	cvtest },
+ 	{ "sy4",	cvtest2 },
+ 
++	/* system call assignment tests */
++	/* For testing the wait implementation. */
++	{ "wt",		waittest },
++
+ 	/* file system assignment tests */
+ 	{ "fs1",	fstest },
+ 	{ "fs2",	readstress },
+diff -r c068f74d7670 -r 49d28958de6a kern/proc/pid.c
+--- /dev/null	Thu Jan 01 00:00:00 1970 +0000
++++ b/kern/proc/pid.c	Wed Sep 24 21:09:36 2014 -0400
+@@ -0,0 +1,465 @@
++/*
++ * Copyright (c) 2000, 2001, 2002, 2003, 2004, 2005, 2008, 2009
++ *	The President and Fellows of Harvard College.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. Neither the name of the University nor the names of its contributors
++ *    may be used to endorse or promote products derived from this software
++ *    without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE UNIVERSITY AND CONTRIBUTORS ``AS IS'' AND
++ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ * ARE DISCLAIMED.  IN NO EVENT SHALL THE UNIVERSITY OR CONTRIBUTORS BE LIABLE
++ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
++ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
++ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
++ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
++ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
++ * SUCH DAMAGE.
++ */
++
++/*
++ * Process ID management.
++ */
++
++#include <types.h>
++#include <kern/errno.h>
++#include <kern/wait.h>
++#include <limits.h>
++#include <lib.h>
++#include <array.h>
++#include <clock.h>
++#include <thread.h>
++#include <proc.h>
++#include <current.h>
++#include <synch.h>
++#include <pid.h>
++
++/*
++ * Structure for holding exit data of a thread.
++ *
++ * If pi_ppid is INVALID_PID, the parent has gone away and will not be
++ * waiting. If pi_ppid is INVALID_PID and pi_exited is true, the
++ * structure can be freed.
++ */
++struct pidinfo {
++	pid_t pi_pid;			// process id of this thread
++	pid_t pi_ppid;			// process id of parent thread
++	volatile bool pi_exited;	// true if thread has exited
++	int pi_exitstatus;		// status (only valid if exited)
++	struct cv *pi_cv;		// use to wait for thread exit
++};
++
++
++/*
++ * Global pid and exit data.
++ *
++ * The process table is an el-cheapo hash table. It's indexed by
++ * (pid % PROCS_MAX), and only allows one process per slot. If a
++ * new pid allocation would cause a hash collision, we just don't
++ * use that pid.
++ */
++static struct lock *pidlock;		// lock for global exit data
++static struct pidinfo *pidinfo[PROCS_MAX]; // actual pid info
++static pid_t nextpid;			// next candidate pid
++static int nprocs;			// number of allocated pids
++
++
++
++/*
++ * Create a pidinfo structure for the specified pid.
++ */
++static
++struct pidinfo *
++pidinfo_create(pid_t pid, pid_t ppid)
++{
++	struct pidinfo *pi;
++
++	KASSERT(pid != INVALID_PID);
++
++	pi = kmalloc(sizeof(struct pidinfo));
++	if (pi==NULL) {
++		return NULL;
++	}
++
++	pi->pi_cv = cv_create("pidinfo cv");
++	if (pi->pi_cv == NULL) {
++		kfree(pi);
++		return NULL;
++	}
++
++	pi->pi_pid = pid;
++	pi->pi_ppid = ppid;
++	pi->pi_exited = false;
++	pi->pi_exitstatus = 0xbeef;  /* Recognizably invalid value */
++
++	return pi;
++}
++
++/*
++ * Clean up a pidinfo structure.
++ */
++static
++void
++pidinfo_destroy(struct pidinfo *pi)
++{
++	KASSERT(pi->pi_exited == true);
++	KASSERT(pi->pi_ppid == INVALID_PID);
++	cv_destroy(pi->pi_cv);
++	kfree(pi);
++}
++
++////////////////////////////////////////////////////////////
++
++/*
++ * pid_bootstrap: initialize.
++ */
++void
++pid_bootstrap(void)
++{
++	int i;
++
++	pidlock = lock_create("pidlock");
++	if (pidlock == NULL) {
++		panic("Out of memory creating pid lock\n");
++	}
++
++	/* not really necessary - should start zeroed */
++	for (i=0; i<PROCS_MAX; i++) {
++		pidinfo[i] = NULL;
++	}
++
++	pidinfo[KERNEL_PID] = pidinfo_create(KERNEL_PID, INVALID_PID);
++	if (pidinfo[KERNEL_PID]==NULL) {
++		panic("Out of memory creating kernel pid data\n");
++	}
++
++	nextpid = PID_MIN;
++	nprocs = 1;
++}
++
++/*
++ * pi_get: look up a pidinfo in the process table.
++ */
++static
++struct pidinfo *
++pi_get(pid_t pid)
++{
++	struct pidinfo *pi;
++
++	KASSERT(pid>=0);
++	KASSERT(pid != INVALID_PID);
++	KASSERT(lock_do_i_hold(pidlock));
++
++	pi = pidinfo[pid % PROCS_MAX];
++	if (pi==NULL) {
++		return NULL;
++	}
++	if (pi->pi_pid != pid) {
++		return NULL;
++	}
++	return pi;
++}
++
++/*
++ * pi_put: insert a new pidinfo in the process table. The right slot
++ * must be empty.
++ */
++static
++void
++pi_put(pid_t pid, struct pidinfo *pi)
++{
++	KASSERT(lock_do_i_hold(pidlock));
++
++	KASSERT(pid != INVALID_PID);
++
++	KASSERT(pidinfo[pid % PROCS_MAX] == NULL);
++	pidinfo[pid % PROCS_MAX] = pi;
++	nprocs++;
++}
++
++/*
++ * pi_drop: remove a pidinfo structure from the process table and free
++ * it. It should reflect a process that has already exited and been
++ * waited for.
++ */
++static
++void
++pi_drop(pid_t pid)
++{
++	struct pidinfo *pi;
++
++	KASSERT(lock_do_i_hold(pidlock));
++
++	pi = pidinfo[pid % PROCS_MAX];
++	KASSERT(pi != NULL);
++	KASSERT(pi->pi_pid == pid);
++
++	pidinfo_destroy(pi);
++	pidinfo[pid % PROCS_MAX] = NULL;
++	nprocs--;
++}
++
++////////////////////////////////////////////////////////////
++
++/*
++ * Helper function for pid_alloc.
++ */
++static
++void
++inc_nextpid(void)
++{
++	KASSERT(lock_do_i_hold(pidlock));
++
++	nextpid++;
++	if (nextpid > PID_MAX) {
++		nextpid = PID_MIN;
++	}
++}
++
++/*
++ * pid_alloc: allocate a process id.
++ */
++int
++pid_alloc(pid_t *retval)
++{
++	struct pidinfo *pi;
++	pid_t pid;
++	int count;
++
++	KASSERT(curproc->p_pid != INVALID_PID);
++
++	/* lock the table */
++	lock_acquire(pidlock);
++
++	if (nprocs == PROCS_MAX) {
++		lock_release(pidlock);
++		return EAGAIN;
++	}
++
++	/*
++	 * The above test guarantees that this loop terminates, unless
++	 * our nprocs count is off. Even so, assert we aren't looping
++	 * forever.
++	 */
++	count = 0;
++	while (pidinfo[nextpid % PROCS_MAX] != NULL) {
++
++		/* avoid various boundary cases by allowing extra loops */
++		KASSERT(count < PROCS_MAX*2+5);
++		count++;
++
++		inc_nextpid();
++	}
++
++	pid = nextpid;
++
++	pi = pidinfo_create(pid, curproc->p_pid);
++	if (pi==NULL) {
++		lock_release(pidlock);
++		return ENOMEM;
++	}
++
++	pi_put(pid, pi);
++
++	inc_nextpid();
++
++	lock_release(pidlock);
++
++	*retval = pid;
++	return 0;
++}
++
++/*
++ * pid_unalloc - unallocate a process id (allocated with pid_alloc) that
++ * hasn't run yet.
++ */
++void
++pid_unalloc(pid_t theirpid)
++{
++	struct pidinfo *them;
++
++	KASSERT(theirpid >= PID_MIN && theirpid <= PID_MAX);
++
++	lock_acquire(pidlock);
++
++	them = pi_get(theirpid);
++	KASSERT(them != NULL);
++	KASSERT(them->pi_exited == false);
++	KASSERT(them->pi_ppid == curproc->p_pid);
++
++	/* keep pidinfo_destroy from complaining */
++	them->pi_exitstatus = 0xdead;
++	them->pi_exited = true;
++	them->pi_ppid = INVALID_PID;
++
++	pi_drop(theirpid);
++
++	lock_release(pidlock);
++}
++
++/*
++ * pid_disown - disown any interest in waiting for a child's exit
++ * status.
++ */
++void
++pid_disown(pid_t theirpid)
++{
++	struct pidinfo *them;
++
++	KASSERT(theirpid >= PID_MIN && theirpid <= PID_MAX);
++
++	lock_acquire(pidlock);
++
++	them = pi_get(theirpid);
++	KASSERT(them != NULL);
++	KASSERT(them->pi_ppid==curproc->p_pid);
++
++	them->pi_ppid = INVALID_PID;
++	if (them->pi_exited) {
++		pi_drop(them->pi_pid);
++	}
++
++	lock_release(pidlock);
++}
++
++/*
++ * pid_setexitstatus: Sets the exit status of this process. Must only
++ * be called if the thread actually had a pid assigned. Wakes up any
++ * waiters and disposes of the piddata if nobody else is still using it.
++ *
++ * As far as the process is concerned, this releases its pid for
++ * subsequent reuse; thus we set curproc->p_pid to INVALID_PID.
++ */
++void
++pid_setexitstatus(int status)
++{
++	struct pidinfo *us;
++	int i;
++
++	lock_acquire(pidlock);
++	KASSERT(curproc->p_pid != INVALID_PID);
++
++	/* First, disown all children */
++	for (i=0; i<PROCS_MAX; i++) {
++		if (pidinfo[i]==NULL) {
++			continue;
++		}
++		if (pidinfo[i]->pi_ppid == curproc->p_pid) {
++			pidinfo[i]->pi_ppid = INVALID_PID;
++			if (pidinfo[i]->pi_exited) {
++				pi_drop(pidinfo[i]->pi_pid);
++			}
++		}
++	}
++
++	/* Now, wake up our parent */
++	us = pi_get(curproc->p_pid);
++	KASSERT(us != NULL);
++
++	us->pi_exitstatus = status;
++	us->pi_exited = true;
++
++	if (us->pi_ppid == INVALID_PID) {
++		/* no parent */
++		pi_drop(curproc->p_pid);
++	}
++	else {
++		cv_broadcast(us->pi_cv, pidlock);
++	}
++
++	curproc->p_pid = INVALID_PID;
++	lock_release(pidlock);
++}
++
++/*
++ * Waits on a pid, returning the exit status when it's available.
++ * status and ret are a kernel pointers, but pid/flags may come from
++ * userland and may thus be maliciously invalid.
++ *
++ * status may be null, in which case the status is thrown away. ret
++ * may only be null if WNOHANG is not set.
++ */
++int
++pid_wait(pid_t theirpid, int *status, int flags, pid_t *ret)
++{
++	struct pidinfo *them;
++
++	KASSERT(curproc->p_pid != INVALID_PID);
++
++	/* Don't let a process wait for itself. */
++	if (theirpid == curproc->p_pid) {
++		return EINVAL;
++	}
++
++	/*
++	 * We don't support the Unix meanings of negative pids or 0
++	 * (0 is INVALID_PID) and other code may break on them, so
++	 * check now.
++	 */
++	if (theirpid == INVALID_PID || theirpid<0) {
++		return ENOSYS;
++	}
++
++	/* Only valid options */
++	if (flags != 0 && flags != WNOHANG) {
++		return EINVAL;
++	}
++
++	lock_acquire(pidlock);
++
++	them = pi_get(theirpid);
++	if (them==NULL) {
++		lock_release(pidlock);
++		return ESRCH;
++	}
++
++	KASSERT(them->pi_pid==theirpid);
++
++	/* Only allow waiting for own children. */
++	if (them->pi_ppid != curproc->p_pid) {
++		lock_release(pidlock);
++		return EPERM;
++	}
++
++	if (them->pi_exited == false) {
++		if (flags == WNOHANG) {
++			lock_release(pidlock);
++			KASSERT(ret != NULL);
++			*ret = 0;
++			return 0;
++		}
++		/* don't need to loop on this */
++		cv_wait(them->pi_cv, pidlock);
++		KASSERT(them->pi_exited == true);
++	}
++
++	if (status != NULL) {
++		*status = them->pi_exitstatus;
++	}
++	if (ret != NULL) {
++		/*
++		 * In Unix you can wait for any of several possible
++		 * processes by passing particular magic values of
++		 * pid. wait then returns the pid you actually
++		 * found. We don't support this, so always return the
++		 * pid we looked for.
++		 */
++		*ret = theirpid;
++	}
++
++	them->pi_ppid = 0;
++	pi_drop(them->pi_pid);
++
++	lock_release(pidlock);
++	return 0;
++}
+diff -r c068f74d7670 -r 49d28958de6a kern/proc/proc.c
+--- a/kern/proc/proc.c	Wed Sep 24 21:07:31 2014 -0400
++++ b/kern/proc/proc.c	Wed Sep 24 21:09:36 2014 -0400
+@@ -49,6 +49,7 @@
+ #include <current.h>
+ #include <addrspace.h>
+ #include <vnode.h>
++#include <pid.h>
+ #include <filetable.h>
+ 
+ /*
+@@ -77,6 +78,7 @@
+ 
+ 	threadarray_init(&proc->p_threads);
+ 	spinlock_init(&proc->p_lock);
++	proc->p_pid = INVALID_PID;
+ 
+ 	/* VM fields */
+ 	proc->p_addrspace = NULL;
+@@ -172,6 +174,7 @@
+ 		as_destroy(as);
+ 	}
+ 
++	KASSERT(proc->p_pid == INVALID_PID);
+ 	threadarray_cleanup(&proc->p_threads);
+ 	spinlock_cleanup(&proc->p_lock);
+ 
+@@ -189,6 +192,7 @@
+ 	if (kproc == NULL) {
+ 		panic("proc_create for kproc failed\n");
+ 	}
++	kproc->p_pid = KERNEL_PID;
+ }
+ 
+ /*
+@@ -200,14 +204,21 @@
+  * It will be given no filetable. The filetable will be initialized in
+  * runprogram().
+  */
+-struct proc *
+-proc_create_runprogram(const char *name)
++int
++proc_create_runprogram(const char *name, struct proc **ret)
+ {
+ 	struct proc *newproc;
++	int result;
+ 
+ 	newproc = proc_create(name);
+ 	if (newproc == NULL) {
+-		return NULL;
++		return ENOMEM;
++	}
++	/* Get a process ID */
++	result = pid_alloc(&newproc->p_pid);
++	if (result) {
++		proc_destroy(newproc);
++		return result;
+ 	}
+ 
+ 	/* VM fields */
+@@ -228,7 +239,8 @@
+ 	}
+ 	spinlock_release(&curproc->p_lock);
+ 
+-	return newproc;
++	*ret = newproc;
++	return 0;
+ }
+ 
+ /*
+@@ -244,43 +256,114 @@
+ int
+ proc_fork(struct proc **ret)
+ {
+-	struct proc *proc;
++	struct proc *newproc;
++	struct addrspace *as;
+ 	struct filetable *tbl;
+ 	int result;
+ 
+-	proc = proc_create(curproc->p_name);
+-	if (proc == NULL) {
++	newproc = proc_create(curproc->p_name);
++	if (newproc == NULL) {
+ 		return ENOMEM;
+ 	}
++	/* Get a process ID */
++	result = pid_alloc(&newproc->p_pid);
++	if (result) {
++		proc_destroy(newproc);
++		return result;
++	}
++
++#if 0 /* not yet */
++	/*
++	 * If the caller doesn't want to collect the exit status,
++	 * detach the new thread with pid_disown.
++	 */
++	if (...) {
++		pid_disown(newproc->p_pid);
++	}
++#endif
+ 
+ 	/* VM fields */
+-	/* do not clone address space -- let caller decide on that */
++	as = proc_getas();
++	if (as != NULL) {
++		result = as_copy(as, &newproc->p_addrspace);
++		if (result) {
++			pid_unalloc(newproc->p_pid);
++			newproc->p_pid = INVALID_PID;
++			proc_destroy(newproc);
++			return result;
++		}
++	}
+ 
+ 	/* VFS fields */
+ 	tbl = curproc->p_filetable;
+ 	if (tbl != NULL) {
+-		result = filetable_copy(tbl, &proc->p_filetable);
++		result = filetable_copy(tbl, &newproc->p_filetable);
+ 		if (result) {
+-			as_destroy(proc->p_addrspace);
+-			proc->p_addrspace = NULL;
+-			proc_destroy(proc);
++			as_destroy(newproc->p_addrspace);
++			newproc->p_addrspace = NULL;
++			pid_unalloc(newproc->p_pid);
++			newproc->p_pid = INVALID_PID;
++			proc_destroy(newproc);
+ 			return result;
+ 		}
+ 	}
+ 
++	/*
++	 * Lock the current process to copy its current directory.
++	 * (We don't need to lock the new process, though, as we have
++	 * the only reference to it.)
++	 */
+ 	spinlock_acquire(&curproc->p_lock);
+-	/* we don't need to lock proc->p_lock as we have the only reference */
+ 	if (curproc->p_cwd != NULL) {
+ 		VOP_INCREF(curproc->p_cwd);
+-		proc->p_cwd = curproc->p_cwd;
++		newproc->p_cwd = curproc->p_cwd;
+ 	}
+ 	spinlock_release(&curproc->p_lock);
+ 
+-	*ret = proc;
++	*ret = newproc;
+ 	return 0;
+ }
+ 
+ /*
++ * Undo proc_fork if nothing's run in the new process yet.
++ */
++void
++proc_unfork(struct proc *newproc)
++{
++	pid_unalloc(newproc->p_pid);
++	newproc->p_pid = INVALID_PID;
++	proc_destroy(newproc);
++}
++
++/*
++ * Make the current process exit.
++ */
++void
++proc_exit(int status)
++{
++	struct proc *proc = curproc;
++
++	/* The kernel isn't supposed to exit. */
++	KASSERT(proc != kproc);
++
++	/* Set exit status and wake up anyone waiting for us. */
++	pid_setexitstatus(status);
++
++	/* Detach from the process and attach to the kernel process. */
++	KASSERT(curthread->t_proc == proc);
++	proc_remthread(curthread);
++	proc_addthread(kproc, curthread);
++
++	/* There should be no threads left in the target process. */
++	KASSERT(threadarray_num(&proc->p_threads) == 0);
++
++	/* Now we can destroy the process. */
++	proc_destroy(proc);
++
++	thread_exit();
++}
++
++/*
+  * Add a thread to a process. Either the thread or the process might
+  * or might not be current.
+  *
+diff -r c068f74d7670 -r 49d28958de6a kern/syscall/proc_syscalls.c
+--- /dev/null	Thu Jan 01 00:00:00 1970 +0000
++++ b/kern/syscall/proc_syscalls.c	Wed Sep 24 21:09:36 2014 -0400
+@@ -0,0 +1,157 @@
++/*
++ * Copyright (c) 2000, 2001, 2002, 2003, 2004, 2005, 2008, 2009
++ *	The President and Fellows of Harvard College.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. Neither the name of the University nor the names of its contributors
++ *    may be used to endorse or promote products derived from this software
++ *    without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE UNIVERSITY AND CONTRIBUTORS ``AS IS'' AND
++ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ * ARE DISCLAIMED.  IN NO EVENT SHALL THE UNIVERSITY OR CONTRIBUTORS BE LIABLE
++ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
++ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
++ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
++ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
++ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
++ * SUCH DAMAGE.
++ */
++
++/*
++ * Process-related syscalls.
++ */
++
++#include <types.h>
++#include <kern/errno.h>
++#include <kern/wait.h>
++#include <lib.h>
++#include <machine/trapframe.h>
++#include <clock.h>
++#include <thread.h>
++#include <proc.h>
++#include <current.h>
++#include <copyinout.h>
++#include <pid.h>
++#include <syscall.h>
++
++
++/*
++ * sys_getpid
++ * love easy syscalls. :)
++ */
++int
++sys_getpid(pid_t *retval)
++{
++	*retval = curproc->p_pid;
++	return 0;
++}
++
++/*
++ * sys__exit()
++ *
++ * The process-level work (exit status, waking up waiters, etc.)
++ * happens in proc_exit(). Then call thread_exit() to make our thread
++ * go away too.
++ */
++__DEAD
++void
++sys__exit(int status)
++{
++	proc_exit(_MKWAIT_EXIT(status));
++	thread_exit();
++}
++
++/*
++ * sys_fork
++ *
++ * create a new process, which begins executing in fork_newthread().
++ */
++
++static
++void
++fork_newthread(void *vtf, unsigned long junk)
++{
++	struct trapframe mytf;
++	struct trapframe *ntf = vtf;
++
++	(void)junk;
++
++	/*
++	 * Now copy the trapframe to our stack, so we can free the one
++	 * that was malloced and use the one on our stack for going to
++	 * userspace.
++	 */
++
++	mytf = *ntf;
++	kfree(ntf);
++
++	enter_forked_process(&mytf);
++}
++
++int
++sys_fork(struct trapframe *tf, pid_t *retval)
++{
++	struct trapframe *ntf;
++	int result;
++	struct proc *newproc;
++
++	/*
++	 * Copy the trapframe to the heap, because we might return to
++	 * userlevel and make another syscall (changing the trapframe)
++	 * before the child runs. The child will free the copy.
++	 */
++
++	ntf = kmalloc(sizeof(struct trapframe));
++	if (ntf==NULL) {
++		return ENOMEM;
++	}
++	*ntf = *tf;
++
++	result = proc_fork(&newproc);
++	if (result) {
++		kfree(ntf);
++		return result;
++	}
++	*retval = newproc->p_pid;
++
++	result = thread_fork(curthread->t_name, newproc,
++			     fork_newthread, ntf, 0);
++	if (result) {
++		proc_unfork(newproc);
++		kfree(ntf);
++		return result;
++	}
++
++	return 0;
++}
++
++/*
++ * sys_waitpid
++ * just pass off the work to the pid code.
++ */
++int
++sys_waitpid(pid_t pid, userptr_t retstatus, int flags, pid_t *retval)
++{
++	int status;
++	int result;
++
++	result = pid_wait(pid, &status, flags, retval);
++	if (result) {
++		return result;
++	}
++
++	if (retstatus != NULL) {
++		result = copyout(&status, retstatus, sizeof(int));
++	}
++	return result;
++}
+diff -r c068f74d7670 -r 49d28958de6a kern/test/synchtest.c
+--- a/kern/test/synchtest.c	Wed Sep 24 21:07:31 2014 -0400
++++ b/kern/test/synchtest.c	Wed Sep 24 21:09:36 2014 -0400
+@@ -32,6 +32,7 @@
+  */
+ 
+ #include <types.h>
++#include <kern/wait.h>
+ #include <lib.h>
+ #include <clock.h>
+ #include <thread.h>
+diff -r c068f74d7670 -r 49d28958de6a kern/test/waittest.c
+--- /dev/null	Thu Jan 01 00:00:00 1970 +0000
++++ b/kern/test/waittest.c	Wed Sep 24 21:09:36 2014 -0400
+@@ -0,0 +1,263 @@
++/*
++ * Copyright (c) 2000, 2001, 2002, 2003, 2004, 2005, 2008, 2009
++ *	The President and Fellows of Harvard College.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. Neither the name of the University nor the names of its contributors
++ *    may be used to endorse or promote products derived from this software
++ *    without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE UNIVERSITY AND CONTRIBUTORS ``AS IS'' AND
++ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ * ARE DISCLAIMED.  IN NO EVENT SHALL THE UNIVERSITY OR CONTRIBUTORS BE LIABLE
++ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
++ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
++ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
++ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
++ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
++ * SUCH DAMAGE.
++ */
++
++/*
++ * Wait test code.
++ */
++#include <types.h>
++#include <kern/wait.h>
++#include <lib.h>
++#include <stdarg.h>
++#include <spl.h>
++#include <thread.h>
++#include <proc.h>
++#include <current.h>
++#include <synch.h>
++#include <pid.h>
++#include <test.h>
++//#include <queue.h> // XXX
++
++#define NTHREADS  8
++
++static struct semaphore *exitsems[NTHREADS];
++
++static
++void
++init_sem(void)
++{
++	int i;
++	for (i = 0; i < NTHREADS; i++) {
++		if (exitsems[i] == NULL) {
++			exitsems[i] = sem_create("waitsem", 0);
++			if (exitsems[i] == NULL) {
++				panic("waittest: sem_create failed\n");
++			}
++		}
++	}
++}
++
++static
++void
++waitfirstthread(void *junk, unsigned long num)
++{
++	unsigned long i;
++	(void)junk;
++
++	kprintf("waitfirstthread %lu started...\n", num);
++
++	for (i = 0; i < 100 * (num + 1); i++)
++		thread_yield();
++
++	kprintf("waitfirstthread %lu exiting.\n", num);
++
++	proc_exit(_MKWAIT_EXIT(num));
++	thread_exit();
++}
++
++static
++void
++exitfirstthread(void *junk, unsigned long num)
++{
++	unsigned long i;
++	(void)junk;
++
++	kprintf("exitfirstthread %lu started...\n", num);
++
++	for (i = 0; i <  100 * (num + 1); i++)
++		thread_yield();
++
++	kprintf("exitfirstthread %lu exiting.\n", num);
++
++	V(exitsems[num]);
++
++	proc_exit(_MKWAIT_EXIT(num));
++	thread_exit();
++}
++
++static
++int
++dofork(const char *name, void (*func)(void *, unsigned long),
++       void *ptrarg, unsigned long numarg, pid_t *ret_pid)
++{
++	struct proc *proc;
++	int result;
++
++	result = proc_fork(&proc);
++	if (result) {
++		return result;
++	}
++	*ret_pid = proc->p_pid;
++	result = thread_fork(name, proc, func, ptrarg, numarg);
++	if (result) {
++		proc_unfork(proc);
++		return result;
++	}
++	return 0;
++}
++
++static
++void
++printstatus(pid_t kid, int err, int status)
++{
++	if (err) {
++		kprintf("Pid %d waitpid error %d!\n", kid, err);
++	}
++	else if (WIFEXITED(status)) {
++		kprintf("Pid %d exit status: %d\n", kid, WEXITSTATUS(status));
++	}
++	else if (WIFSIGNALED(status)) {
++		kprintf("Pid %d exit signal: %d\n", kid, WTERMSIG(status));
++	}
++	else {
++		kprintf("Pid %d bad exit status %d\n", kid, status);
++	}
++}
++
++int
++waittest(int nargs, char **args)
++{
++	int i, spl, status, err;
++	pid_t kid;
++
++	pid_t kids2[NTHREADS];
++	int kids2_head = 0, kids2_tail = 0;
++
++	(void)nargs;
++	(void)args;
++
++	init_sem();
++
++	kprintf("Starting wait test...\n");
++
++	/*
++	 * This first set should (hopefully) still be running when
++	 * wait is called (helped by the splhigh).
++	 */
++
++	kprintf("\n");
++	kprintf("Set 1 (wait should generally succeed)\n");
++	kprintf("-------------------------------------\n");
++
++	spl = splhigh();
++	for (i = 0; i < NTHREADS; i++) {
++		err = dofork("wait test thread", waitfirstthread, NULL, i,
++			     &kid);
++		if (err) {
++			panic("waittest: dofork failed (%d)\n", err);
++		}
++		kprintf("Spawned pid %d\n", kid);
++		kids2[kids2_tail] = kid;
++		kids2_tail = (kids2_tail+1) % NTHREADS;
++	}
++	splx(spl);
++
++	for (i = 0; i < NTHREADS; i++) {
++		kid = kids2[kids2_head];
++		kids2_head = (kids2_head+1) % NTHREADS;
++		kprintf("Waiting on pid %d...\n", kid);
++		err = pid_wait(kid, &status, 0, NULL);
++		printstatus(kid, err, status);
++	}
++
++	/*
++	 * This second set has to V their semaphore before the exit,
++	 * so when wait is called, they will have already exited, but
++	 * their parent is still alive.
++	 */
++
++	kprintf("\n");
++	kprintf("Set 2 (wait should always succeed)\n");
++	kprintf("----------------------------------\n");
++
++	for (i = 0; i < NTHREADS; i++) {
++		err = dofork("wait test thread", exitfirstthread, NULL, i,
++			     &kid);
++		if (err) {
++			panic("waittest: dofork failed (%d)\n", err);
++		}
++		kprintf("Spawned pid %d\n", kid);
++		kids2[kids2_tail] = kid;
++		kids2_tail = (kids2_tail+1) % NTHREADS;
++		if (err) {
++			panic("waittest: q_addtail failed (%d)\n", err);
++		}
++	}
++
++	for (i = 0; i < NTHREADS; i++) {
++		kid = kids2[kids2_head];
++		kids2_head = (kids2_head+1) % NTHREADS;
++		kprintf("Waiting for pid %d to V()...\n", kid);
++		P(exitsems[i]);
++		kprintf("Appears that pid %d P()'d\n", kid);
++		kprintf("Waiting on pid %d...\n", kid);
++		err = pid_wait(kid, &status, 0, NULL);
++		printstatus(kid, err, status);
++	}
++
++	/*
++	 * This third set has to V their semaphore before the exit, so
++	 * when wait is called, they will have already exited, and
++	 * since we've gone through and disowned them all, their exit
++	 * statuses should have been disposed of already and our waits
++	 * should all fail.
++	 */
++
++	kprintf("\n");
++	kprintf("Set 3 (wait should never succeed)\n");
++	kprintf("---------------------------------\n");
++
++	for (i = 0; i < NTHREADS; i++) {
++		err = dofork("wait test thread", exitfirstthread, NULL, i,
++				  &kid);
++		if (err) {
++			panic("waittest: dofork failed (%d)\n", err);
++		}
++		kprintf("Spawned pid %d\n", kid);
++
++		pid_disown(kid);
++
++		kids2[kids2_tail] = kid;
++		kids2_tail = (kids2_tail+1) % NTHREADS;
++	}
++
++	for (i = 0; i < NTHREADS; i++) {
++		kid = kids2[kids2_head];
++		kids2_head = (kids2_head+1) % NTHREADS;
++		kprintf("Waiting for pid %d to V()...\n", kid);
++		P(exitsems[i]);
++		kprintf("Appears that pid %d P()'d\n", kid);
++		kprintf("Waiting on pid %d...\n", kid);
++		err = pid_wait(kid, &status, 0, NULL);
++		printstatus(kid, err, status);
++	}
++
++	kprintf("\nWait test done.\n");
++
++	return 0;
++}
+diff -r c068f74d7670 -r 49d28958de6a kern/thread/thread.c
+--- a/kern/thread/thread.c	Wed Sep 24 21:07:31 2014 -0400
++++ b/kern/thread/thread.c	Wed Sep 24 21:09:36 2014 -0400
+@@ -35,6 +35,8 @@
+ 
+ #include <types.h>
+ #include <kern/errno.h>
++#include <kern/wait.h>
++#include <limits.h>
+ #include <lib.h>
+ #include <array.h>
+ #include <cpu.h>
+@@ -50,6 +52,7 @@
+ #include <addrspace.h>
+ #include <mainbus.h>
+ #include <vnode.h>
++#include <pid.h>
+ 
+ 
+ /* Magic number used as a guard value on kernel thread stacks. */
+@@ -780,13 +783,13 @@
+ 
+ 	cur = curthread;
+ 
+-	/*
+-	 * Detach from our process. You might need to move this action
+-	 * around, depending on how your wait/exit works.
+-	 */
++	/* We should be attached only to the kernel process. */
++	KASSERT(cur->t_proc == kproc);
++
++	/* Detach from the kernel process. */
+ 	proc_remthread(cur);
+ 
+-	/* Make sure we *are* detached (move this only if you're sure!) */
++	/* Make sure we *are* detached. */
+ 	KASSERT(cur->t_proc == NULL);
+ 
+ 	/* Check the stack guard band. */
+@@ -794,7 +797,11 @@
+ 
+ 	/* Interrupts off on this processor */
+         splhigh();
++
++	/* This doesn't come back... */
+ 	thread_switch(S_ZOMBIE, NULL, NULL);
++
++	/* ...so if it does, something's wrong. */
+ 	panic("braaaaaaaiiiiiiiiiiinssssss\n");
+ }
+ 

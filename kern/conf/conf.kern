@@ -331,6 +331,7 @@ file      thread/threadlist.c
 #
 
 file      proc/proc.c
+file      proc/pid.c
 
 #
 # Virtual memory system
@@ -373,8 +374,12 @@ file      vfs/devnull.c
 # calls assignment.)
 #
 
+file      syscall/filetable.c
 file      syscall/loadelf.c
+file      syscall/openfile.c
 file      syscall/runprogram.c
+file      syscall/file_syscalls.c
+file      syscall/proc_syscalls.c
 file      syscall/time_syscalls.c
 
 #
@@ -437,6 +442,9 @@ optfile   synchprobs  synchprobs/airballoon.c
 #              Test code               #
 #                                      #
 ########################################
+
+# For testing the wait implementation.
+file		test/waittest.c
 
 file		test/arraytest.c
 file		test/bitmaptest.c

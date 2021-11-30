@@ -32,6 +32,7 @@
  */
 
 #include <types.h>
+#include <kern/wait.h>
 #include <lib.h>
 #include <clock.h>
 #include <thread.h>

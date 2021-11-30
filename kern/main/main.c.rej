@@ -1,0 +1,10 @@
+diff a/kern/main/main.c b/kern/main/main.c	(rejected hunks)
+@@ -99,7 +99,7 @@
+ 
+ 	kprintf("\n");
+ 	kprintf("OS/161 base system version %s\n", BASE_VERSION);
+-	kprintf("(with locks/CVs, file/proc system calls solutions)\n");
++	kprintf("(with locks/CVs, system calls solutions)\n");
+ 	kprintf("%s", harvard_copyright);
+ 	kprintf("\n");
+ 

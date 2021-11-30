@@ -1,0 +1,36 @@
+diff a/kern/main/menu.c b/kern/main/menu.c	(rejected hunks)
+@@ -39,6 +40,7 @@
+ #include <proc.h>
+ #include <vfs.h>
+ #include <sfs.h>
++#include <pid.h>
+ #include <syscall.h>
+ #include <test.h>
+ #include "opt-sfs.h"
+@@ -114,12 +108,15 @@
+ {
+ 	struct proc *proc;
+ 	int result;
++	pid_t childpid;
++	int status;
+ 
+ 	/* Create a process for the new program to run in. */
+-	proc = proc_create_runprogram(args[0] /* name */);
+-	if (proc == NULL) {
+-		return ENOMEM;
++	result = proc_create_runprogram(args[0] /* name */, &proc);
++	if (result) {
++		return result;
+ 	}
++	childpid = proc->p_pid;
+ 
+ 	result = thread_fork(args[0] /* thread name */,
+ 			proc /* new process */,
+@@ -475,6 +481,7 @@
+ 	"[sy2] Lock test                     ",
+ 	"[sy3] CV test                       ",
+ 	"[sy4] CV test #2                    ",
++	"[wt]  waitpid test                  ",
+ 	"[fs1] Filesystem test               ",
+ 	"[fs2] FS read stress                ",
+ 	"[fs3] FS write stress               ",

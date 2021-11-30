@@ -44,6 +44,7 @@
 #define PID_MIN         __PID_MIN
 #define PID_MAX         __PID_MAX
 #define PIPE_BUF        __PIPE_BUF
+#define PROCS_MAX       __PROCS_MAX
 #define NGROUPS_MAX     __NGROUPS_MAX
 #define LOGIN_NAME_MAX  __LOGIN_NAME_MAX
 #define OPEN_MAX        __OPEN_MAX

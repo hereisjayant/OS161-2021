@@ -1,0 +1,762 @@
+Diff from os161-locks-1.99.08 to os161-filetables-1.99.08.
+To apply, run patch -p1 < thispatchfile in the top level directory
+of the OS/161 tree.
+
+diff -r 1ffadb186634 -r bed1817e4048 CHANGES.syscalls
+--- /dev/null	Thu Jan 01 00:00:00 1970 +0000
++++ b/CHANGES.syscalls	Wed Sep 24 21:03:08 2014 -0400
+@@ -0,0 +1,63 @@
++The system calls solution set (formerly "sol2") was written by Amos
++Blackman in 2001, with contributions from David A. Holland. Much of
++it was reworked in 2014 by the latter.
++
++------------------------------------------------------------
++
++(Also see CHANGES.locks and CHANGES.)
++
++20140924 dholland	Version 1.99.08 of the system calls solutions released.
++20140822 dholland	Use separate locks for openfile offset and refcount.
++20140822 dholland	Rework the filetable abstraction completely.
++20140822 dholland	Rework the openfile abstraction completely.
++20140822 dholland	Don't include syscall-level code in the file tables.
++20140822 dholland	Split file.h -> openfile.h and filetable.h.
++
++20140123 dholland	Version 1.99.07 of the system calls solutions released.
++20100108 dholland	Split out design notes for filetables.
++20100106 dholland	Split solution code into filetables, filesyscalls,
++			procsyscalls, exec, and scheduling patches.
++
++20090414 dholland	sol2-1.99.04 released.
++20090402 dholland	sol2-1.99.03 released.
++20090219 dholland	sol2-1.99.02 released.
++20090219 dholland	Update design notes.
++20090213 dholland	Merge the 1.x sol2 code into OS/161 2.x.
++
++
++------------------------------------------------------------
++
++20050913 dholland	sol2-1.11 released.
++
++20040203 dholland	sol2-1.10 released.
++
++20031227 dholland	sol2-1.09 released.
++20030626 dholland	Minor include fixes.
++20030612 dholland	Fix up some obsolete comments.
++
++20030310 dholland	sol2-1.08 released. (1.07 skipped.)
++20030129 dholland	Add prefix to struct filetable members for consistency.
++20030129 dholland	Add prefix to struct openfile members for consistency.
++
++20030117 dholland	sol2-1.06 released.
++20030117 dholland	Make initial bootup message say "solution set 2".
++
++20020917 dholland	sol2-1.05 released.
++20020916 dholland	Created this changelog from CVS log data.
++
++20020309 dholland	sol2-1.04 released.
++20020309 dholland	Design docs for sol2.
++20020307 dholland	Various fixes.
++20010618 dholland	Various fixes and cleanup.
++20010528 blackman	Bug fix.
++
++20010320 blackman	sol2-2001 released.
++20010320 blackman	More bug fixes.
++
++20010315 blackman	sol2-2001-buggy released.
++20010315 blackman	Bug fixes.
++20010314 blackman	Cleanup and commenting.
++20010313 blackman	New sol2 code, including parts of the original code.
++20010312 blackman	Back out the previous sol2 code.
++20010224 dholland	Bug fixes.
++20010215 dholland	Initial sol2 code.
+diff -r 1ffadb186634 -r bed1817e4048 design/filetables.txt
+--- /dev/null	Thu Jan 01 00:00:00 1970 +0000
++++ b/design/filetables.txt	Wed Sep 24 21:03:08 2014 -0400
+@@ -0,0 +1,111 @@
++File tables and open files
++--------------------------
++
++Herein we provide two abstractions: open files and file tables.
++
++An open file is a wrapper around a vnode that keeps track of the
++per-open state. When you open a file, you get a new open file object;
++when you create another reference to an already-opened file (via dup2,
++fork, and similar operations) you share the open file object.
++
++A file table is a collection of open files, indexed by small integers
++(known as "file descriptors" or "file handles") and provides a set of
++abstract operations that permit the manipulations that system calls
++need to do.
++
++Open files appear as struct openfile and contain:
++   - a vnode
++   - an access mode (O_RDONLY, O_WRONLY, or O_RDWR)
++   - a seek position (of type off_t)
++as well as a reference count for sharing and locks for protection.
++
++The operations on the open file abstraction are:
++   openfile_open(), which calls vfs_open() on a path and returns an
++	open file object;
++   openfile_incref(), which increments the reference count;
++   openfile_decref(), which decrements the reference count, and
++	calls vfs_close() when the object goes away.
++
++System call code will typically manipulate the other contents (other
++than the reference count) of the open file object directly. The
++locking model is:
++
++   - The vnode member, of_vnode, is constant once the open file
++     object is created and does not need locking for access. So
++     is the access mode.
++
++   - The of_offsetlock member protects the seek position (of_offset)
++     field.
++
++   - The of_reflock field protects the reference count. Since this is
++     manipulated using the openfile_incref() and openfile_decref()
++     functions, external code should not need to use of_reflock, and
++     of_reflock is a leaf from a locking order perspective.
++
++File tables appear as struct filetable and each contain an array of
++open files. While this array is currently exposed, in principle the
++abstract operations on the file table are sufficient for all
++manipulations that need to be performed. These operations are:
++
++   filetable_create(), which constructs a new empty file table;
++   filetable_destroy(), which drops the references to any open files
++	in the table (with openfile_decref) and then destroys the
++	table;
++   filetable_copy(), which clones a file table, sharing the open files
++	it contains, as needed by fork();
++   filetable_okfd(), which checks a file descriptor for being in
++	range (nonnegative and less than OPEN_MAX) and returns true
++	if so and false otherwise;
++   filetable_get(), which retrieves the open file associated with a
++	numeric file descriptor;
++   filetable_put(), which should be called when done with the open
++	file retrieved with filetable_get();
++   filetable_place(), which inserts an open file in the table and
++	returns the file descriptor allocated for it;
++   filetable_placeat(), which inserts an open file in the table at a
++	specified place and returns the open file previously in that
++	position, or NULL if there was none.
++
++filetable_get() includes a call to filetable_okfd() for range checking
++and returns EBADF if out of range. It also returns EBADF if the open
++file entry in the table is NULL, that is, the file descriptor does not
++reference an open file. Therefore, the open file it returns should
++never be NULL.
++
++filetable_put() should be passed the open file previously retrieved by
++a successful call to filetable_get(). It is not valid to change this
++table entry before filetable_put() is called. If you need to, get your
++own reference to the open file with openfile_incref(), call
++filetable_put(), and then change the table. Otherwise the open file
++might disappear under you.
++
++filetable_placeat() does *not* include a call to filetable_okfd(),
++except as an assertion; call that first if not passing a known-good
++file descriptor value.
++
++You can place NULL with filetable_placeat(); this can be used e.g. to
++implement close().
++
++References: filetable_get() borrows the file table's reference to the
++open file object returned; use filetable_put() to give it back.
++However, filetable_place() and filetable_placeat() consume the
++reference passed in. (And filetable_placeat() returns a reference to
++the old file returned, if any.)
++
++Because we assume the file table will be a per-process object and not
++shared (file tables should be copied at fork time) and that processes
++are single-threaded, the file table objects do not require locking.
++However, the abstraction has intentionally been framed such that they
++can be made suitable for multithreaded processes without changing
++either the interface or code using the interface. (This is one of the
++reasons for filetable_put().)
++
++The maximum number of files that can be in a file table at once is
++OPEN_MAX, which is declared in limits.h and kern/limits.h. The value
++of OPEN_MAX can be changed (within reason) without breaking the code.
++Making the limit adjustable on the fly, as it is in modern Unix,
++should not be a difficult exercise.
++
++The open file abstraction is declared in openfile.h and implemented in
++syscall/openfile.c. The file table abstraction is declared in
++filetable.h and implemented in syscall/filetable.h.
+diff -r 1ffadb186634 -r bed1817e4048 kern/conf/conf.kern
+--- a/kern/conf/conf.kern	Wed Sep 24 21:03:00 2014 -0400
++++ b/kern/conf/conf.kern	Wed Sep 24 21:03:08 2014 -0400
+@@ -373,7 +373,9 @@
+ # calls assignment.)
+ #
+ 
++file      syscall/filetable.c
+ file      syscall/loadelf.c
++file      syscall/openfile.c
+ file      syscall/runprogram.c
+ file      syscall/time_syscalls.c
+ 
+diff -r 1ffadb186634 -r bed1817e4048 kern/include/filetable.h
+--- /dev/null	Thu Jan 01 00:00:00 1970 +0000
++++ b/kern/include/filetable.h	Wed Sep 24 21:03:08 2014 -0400
+@@ -0,0 +1,90 @@
++/*
++ * Copyright (c) 2000, 2001, 2002, 2003, 2004, 2005, 2008, 2009, 2014
++ *	The President and Fellows of Harvard College.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. Neither the name of the University nor the names of its contributors
++ *    may be used to endorse or promote products derived from this software
++ *    without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE UNIVERSITY AND CONTRIBUTORS ``AS IS'' AND
++ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ * ARE DISCLAIMED.  IN NO EVENT SHALL THE UNIVERSITY OR CONTRIBUTORS BE LIABLE
++ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
++ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
++ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
++ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
++ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
++ * SUCH DAMAGE.
++ */
++
++/*
++ * File table management.
++ */
++
++#ifndef _FILETABLE_H_
++#define _FILETABLE_H_
++
++#include <limits.h> /* for OPEN_MAX */
++
++
++/*
++ * The file table is an array of open files.
++ *
++ * There is no particular reason to use a fixed size array (of size
++ * OPEN_MAX) instead of a dynamically sized array (using array.h) --
++ * the code was just written this way years ago and there's no
++ * compelling reason to change it that outweighs this benefit: you can
++ * look through the code to see what it would take to make it dynamic,
++ * or even to make it dynamic with the limit being user-settable. (See
++ * setrlimit(2) on a Unix machine.)
++ *
++ * Because we only have single-threaded processes, the file table is
++ * never shared and so it doesn't require synchronization. On fork,
++ * the table is copied. Another exercise: what would you need to do to
++ * make this code safe for multithreaded processes? What happens if
++ * one thread calls close() while another one is in the middle of e.g.
++ * read() using the same file handle?
++ */
++struct filetable {
++	struct openfile *ft_openfiles[OPEN_MAX];
++};
++
++/*
++ * Filetable ops:
++ *
++ * create -  Construct an empty file table.
++ * destroy - Wipe out a file table, closing anything open in it.
++ * copy -    Clone a file table.
++ * okfd -    Check if a file handle is in range.
++ * get/put - Retrieve a fd for use and put it back when done. (Checks
++ *           okfd and also fails on files not open; returned openfile
++ *           is not NULL.) Call put with the file returned from get.
++ * place -   Insert a file and return the fd.
++ * placeat - Insert a file at a specific slot and return the file
++ *           previously there.
++ */
++
++struct filetable *filetable_create(void);
++void filetable_destroy(struct filetable *ft);
++int filetable_copy(struct filetable *src, struct filetable **dest_ret);
++
++bool filetable_okfd(struct filetable *ft, int fd);
++int filetable_get(struct filetable *ft, int fd, struct openfile **ret);
++void filetable_put(struct filetable *ft, int fd, struct openfile *file);
++
++int filetable_place(struct filetable *ft, struct openfile *file, int *fd);
++void filetable_placeat(struct filetable *ft, struct openfile *newfile, int fd,
++		       struct openfile **oldfile_ret);
++
++
++#endif /* _FILETABLE_H_ */
+diff -r 1ffadb186634 -r bed1817e4048 kern/include/openfile.h
+--- /dev/null	Thu Jan 01 00:00:00 1970 +0000
++++ b/kern/include/openfile.h	Wed Sep 24 21:03:08 2014 -0400
+@@ -0,0 +1,71 @@
++/*
++ * Copyright (c) 2000, 2001, 2002, 2003, 2004, 2005, 2008, 2009, 2014
++ *	The President and Fellows of Harvard College.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. Neither the name of the University nor the names of its contributors
++ *    may be used to endorse or promote products derived from this software
++ *    without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE UNIVERSITY AND CONTRIBUTORS ``AS IS'' AND
++ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ * ARE DISCLAIMED.  IN NO EVENT SHALL THE UNIVERSITY OR CONTRIBUTORS BE LIABLE
++ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
++ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
++ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
++ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
++ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
++ * SUCH DAMAGE.
++ */
++
++/*
++ * File handles.
++ */
++
++#ifndef _OPENFILE_H_
++#define _OPENFILE_H_
++
++#include <spinlock.h>
++
++
++/*
++ * Structure for open files.
++ *
++ * This is pretty much just a wrapper around a vnode; the important
++ * additional things we keep here are the open mode and the file's
++ * seek position.
++ *
++ * Open files are reference-counted because they get shared via fork
++ * and dup2 calls. And they need locking because that sharing can be
++ * among multiple concurrent processes.
++ */
++struct openfile {
++	struct vnode *of_vnode;
++	int of_accmode;	/* from open: O_RDONLY, O_WRONLY, or O_RDWR */
++
++	struct lock *of_offsetlock;	/* lock for of_offset */
++	off_t of_offset;
++
++	struct spinlock of_reflock;	/* lock for of_refcount */
++	int of_refcount;
++};
++
++/* open a file (args must be kernel pointers; destroys filename) */
++int openfile_open(char *filename, int openflags, mode_t mode,
++		  struct openfile **ret);
++
++/* adjust the refcount on an openfile */
++void openfile_incref(struct openfile *);
++void openfile_decref(struct openfile *);
++
++
++#endif /* _OPENFILE_H_ */
+diff -r 1ffadb186634 -r bed1817e4048 kern/syscall/filetable.c
+--- /dev/null	Thu Jan 01 00:00:00 1970 +0000
++++ b/kern/syscall/filetable.c	Wed Sep 24 21:03:08 2014 -0400
+@@ -0,0 +1,237 @@
++/*
++ * Copyright (c) 2000, 2001, 2002, 2003, 2004, 2005, 2008, 2009, 2014
++ *	The President and Fellows of Harvard College.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. Neither the name of the University nor the names of its contributors
++ *    may be used to endorse or promote products derived from this software
++ *    without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE UNIVERSITY AND CONTRIBUTORS ``AS IS'' AND
++ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ * ARE DISCLAIMED.  IN NO EVENT SHALL THE UNIVERSITY OR CONTRIBUTORS BE LIABLE
++ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
++ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
++ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
++ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
++ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
++ * SUCH DAMAGE.
++ */
++
++/*
++ * File tables.
++ */
++
++#include <types.h>
++#include <kern/errno.h>
++#include <lib.h>
++#include <openfile.h>
++#include <filetable.h>
++
++
++/*
++ * Construct a filetable.
++ */
++struct filetable *
++filetable_create(void)
++{
++	struct filetable *ft;
++	int fd;
++
++	ft = kmalloc(sizeof(struct filetable));
++	if (ft == NULL) {
++		return NULL;
++	}
++
++	/* the table starts empty */
++	for (fd = 0; fd < OPEN_MAX; fd++) {
++		ft->ft_openfiles[fd] = NULL;
++	}
++
++	return ft;
++}
++
++/*
++ * Destroy a filetable.
++ */
++void
++filetable_destroy(struct filetable *ft)
++{
++	int fd;
++
++	KASSERT(ft != NULL);
++
++	/* Close any open files. */
++	for (fd = 0; fd < OPEN_MAX; fd++) {
++		if (ft->ft_openfiles[fd] != NULL) {
++			openfile_decref(ft->ft_openfiles[fd]);
++			ft->ft_openfiles[fd] = NULL;
++		}
++	}
++	kfree(ft);
++}
++
++/*
++ * Clone a filetable, for use in fork.
++ *
++ * The underlying openfile objects are shared, not copied; this means
++ * that the seek position is shared among file handles inherited
++ * across forks. In Unix this means that shell operations like
++ *
++ *    (
++ *       echo hi
++ *       echo there
++ *    ) > file
++ *
++ * produce the intended output instead of having the second echo
++ * command overwrite the first.
++ */
++int
++filetable_copy(struct filetable *src, struct filetable **dest_ret)
++{
++	struct filetable *dest;
++	struct openfile *file;
++	int fd;
++
++	/* Copying the nonexistent table avoids special cases elsewhere */
++	if (src == NULL) {
++		*dest_ret = NULL;
++		return 0;
++	}
++
++	dest = filetable_create();
++	if (dest == NULL) {
++		return ENOMEM;
++	}
++
++	/* share the entries */
++	for (fd = 0; fd < OPEN_MAX; fd++) {
++		file = src->ft_openfiles[fd];
++		if (file != NULL) {
++			openfile_incref(file);
++		}
++		dest->ft_openfiles[fd] = file;
++	}
++
++	*dest_ret = dest;
++	return 0;
++}
++
++/*
++ * Check if a file handle is in range.
++ */
++bool
++filetable_okfd(struct filetable *ft, int fd)
++{
++	/* We have a fixed-size table so we don't need to check the size */
++	(void)ft;
++
++	return (fd >= 0 && fd < OPEN_MAX);
++}
++
++/*
++ * Get an openfile from a filetable. Calls to filetable_get should be
++ * matched by calls to filetable_put.
++ *
++ * This checks that the file handle is in range and fails rather than
++ * returning a null openfile; it only yields files that are actually
++ * open.
++ */
++int
++filetable_get(struct filetable *ft, int fd, struct openfile **ret)
++{
++	struct openfile *file;
++
++	if (!filetable_okfd(ft, fd)) {
++		return EBADF;
++	}
++
++	file = ft->ft_openfiles[fd];
++	if (file == NULL) {
++		return EBADF;
++	}
++
++	*ret = file;
++	return 0;
++}
++
++/*
++ * Put a file handle back when done with it. This does not actually do
++ * anything (other than crosscheck) but it's always good practice to
++ * build things so when you take them out you put them back again
++ * rather than dropping them on the floor. Then if you need to do
++ * something at cleanup time you can put it in this function instead
++ * of having to hunt for all the places to insert the new logic.
++ *
++ * (For example, if you have multithreaded processes you will need to
++ * insert additional lock and/or refcount manipulations here and in
++ * filetable_get.)
++ *
++ * The openfile should be the one returned from filetable_get. If you
++ * want to manipulate the table so the assertion's no longer true, get
++ * your own reference to the openfile (with openfile_incref) and call
++ * filetable_put before mucking about.
++ */
++void
++filetable_put(struct filetable *ft, int fd, struct openfile *file)
++{
++	KASSERT(ft->ft_openfiles[fd] == file);
++}
++
++/*
++ * Place a file in a file table and return the descriptor. We always
++ * use the smallest available descriptor, because Unix works that way.
++ * (Unix works that way because in the days before dup2 was invented,
++ * the behavior had to be defined explicitly in order to allow
++ * manipulating stdin/stdout/stderr.)
++ *
++ * Consumes a reference to the openfile object. (That reference is
++ * placed in the table.)
++ */
++int
++filetable_place(struct filetable *ft, struct openfile *file, int *fd_ret)
++{
++	int fd;
++
++	for (fd = 0; fd < OPEN_MAX; fd++) {
++		if (ft->ft_openfiles[fd] == NULL) {
++			ft->ft_openfiles[fd] = file;
++			*fd_ret = fd;
++			return 0;
++		}
++	}
++
++	return EMFILE;
++}
++
++/*
++ * Place a file in a file table at a specific location and return the
++ * file previously at that location. The location must be in range.
++ *
++ * Consumes a reference to the passed-in openfile object; returns a
++ * reference to the old openfile object (if not NULL); this should
++ * generally be decref'd.
++ *
++ * Doesn't fail.
++ *
++ * Note that you can use this to place NULL in the filetable, which is
++ * potentially handy.
++ */
++void
++filetable_placeat(struct filetable *ft, struct openfile *newfile, int fd,
++		  struct openfile **oldfile_ret)
++{
++	KASSERT(filetable_okfd(ft, fd));
++
++	*oldfile_ret = ft->ft_openfiles[fd];
++	ft->ft_openfiles[fd] = newfile;
++}
+diff -r 1ffadb186634 -r bed1817e4048 kern/syscall/openfile.c
+--- /dev/null	Thu Jan 01 00:00:00 1970 +0000
++++ b/kern/syscall/openfile.c	Wed Sep 24 21:03:08 2014 -0400
+@@ -0,0 +1,149 @@
++/*
++ * Copyright (c) 2000, 2001, 2002, 2003, 2004, 2005, 2008, 2009, 2014
++ *	The President and Fellows of Harvard College.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. Neither the name of the University nor the names of its contributors
++ *    may be used to endorse or promote products derived from this software
++ *    without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE UNIVERSITY AND CONTRIBUTORS ``AS IS'' AND
++ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ * ARE DISCLAIMED.  IN NO EVENT SHALL THE UNIVERSITY OR CONTRIBUTORS BE LIABLE
++ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
++ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
++ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
++ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
++ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
++ * SUCH DAMAGE.
++ */
++
++/*
++ * File handles.
++ */
++
++#include <types.h>
++#include <kern/errno.h>
++#include <kern/fcntl.h>
++#include <lib.h>
++#include <synch.h>
++#include <vfs.h>
++#include <openfile.h>
++
++/*
++ * Constructor for struct openfile.
++ */
++static
++struct openfile *
++openfile_create(struct vnode *vn, int accmode)
++{
++	struct openfile *file;
++
++	/* this should already have been checked (e.g. by vfs_open) */
++	KASSERT(accmode == O_RDONLY ||
++		accmode == O_WRONLY ||
++		accmode == O_RDWR);
++
++	file = kmalloc(sizeof(struct openfile));
++	if (file == NULL) {
++		return NULL;
++	}
++
++	file->of_offsetlock = lock_create("openfile");
++	if (file->of_offsetlock == NULL) {
++		kfree(file);
++		return NULL;
++	}
++
++	spinlock_init(&file->of_reflock);
++
++	file->of_vnode = vn;
++	file->of_accmode = accmode;
++	file->of_offset = 0;
++	file->of_refcount = 1;
++
++	return file;
++}
++
++/*
++ * Destructor for struct openfile. Private; should only be used via
++ * openfile_decref().
++ */
++static
++void
++openfile_destroy(struct openfile *file)
++{
++	/* balance vfs_open with vfs_close (not VOP_DECREF) */
++	vfs_close(file->of_vnode);
++
++	spinlock_cleanup(&file->of_reflock);
++	lock_destroy(file->of_offsetlock);
++	kfree(file);
++}
++
++/*
++ * Open a file (with vfs_open) and wrap it in an openfile object.
++ */
++int
++openfile_open(char *filename, int openflags, mode_t mode,
++	      struct openfile **ret)
++{
++	struct vnode *vn;
++	struct openfile *file;
++	int result;
++
++	result = vfs_open(filename, openflags, mode, &vn);
++	if (result) {
++		return result;
++	}
++
++	file = openfile_create(vn, openflags & O_ACCMODE);
++	if (file == NULL) {
++		vfs_close(vn);
++		return ENOMEM;
++	}
++
++	*ret = file;
++	return 0;
++}
++
++/*
++ * Increment the reference count on an openfile.
++ */
++void
++openfile_incref(struct openfile *file)
++{
++	spinlock_acquire(&file->of_reflock);
++	file->of_refcount++;
++	spinlock_release(&file->of_reflock);
++}
++
++/*
++ * Decrement the reference count on an openfile. Destroys it when the
++ * reference count reaches zero.
++ */
++void
++openfile_decref(struct openfile *file)
++{
++	spinlock_acquire(&file->of_reflock);
++
++	/* if this is the last close of this file, free it up */
++	if (file->of_refcount == 1) {
++		spinlock_release(&file->of_reflock);
++		openfile_destroy(file);
++	}
++	else {
++		KASSERT(file->of_refcount > 1);
++		file->of_refcount--;
++		spinlock_release(&file->of_reflock);
++	}
++}

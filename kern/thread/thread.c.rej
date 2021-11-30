@@ -1,0 +1,9 @@
+diff a/kern/thread/thread.c b/kern/thread/thread.c	(rejected hunks)
+@@ -50,6 +52,7 @@
+ #include <addrspace.h>
+ #include <mainbus.h>
+ #include <vnode.h>
++#include <pid.h>
+ 
+ 
+ /* Magic number used as a guard value on kernel thread stacks. */

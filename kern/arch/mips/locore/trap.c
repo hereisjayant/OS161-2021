@@ -28,6 +28,7 @@
  */
 
 #include <types.h>
+#include <kern/wait.h>
 #include <signal.h>
 #include <lib.h>
 #include <mips/specialreg.h>
@@ -35,6 +36,7 @@
 #include <cpu.h>
 #include <spl.h>
 #include <thread.h>
+#include <proc.h>
 #include <current.h>
 #include <vm.h>
 #include <mainbus.h>
@@ -108,13 +110,19 @@ kill_curthread(vaddr_t epc, unsigned code, vaddr_t vaddr)
 		break;
 	}
 
-	/*
-	 * You will probably want to change this.
-	 */
-
+	/* For now, keep the message; it can be useful when debugging. */
 	kprintf("Fatal user mode trap %u sig %d (%s, epc 0x%x, vaddr 0x%x)\n",
 		code, sig, trapcodenames[code], epc, vaddr);
-	panic("I don't know how to handle this\n");
+
+	/*
+	 * Call proc_exit, creating an exit status that reflects the
+	 * signal number we died on. Since we don't implement core
+	 * dumps, we don't ever use _MKWAIT_CORE().
+	 */
+	proc_exit(_MKWAIT_SIG(sig));
+
+	/* Now, the thread can go away too. */
+	thread_exit();
 }
 
 /*

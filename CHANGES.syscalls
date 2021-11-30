@@ -1,0 +1,92 @@
+The system calls solution set (formerly "sol2") was written by Amos
+Blackman in 2001, with contributions from David A. Holland. Much of
+it was reworked in 2014 by the latter.
+
+------------------------------------------------------------
+
+(Also see CHANGES.locks and CHANGES.)
+
+20140924 dholland	Version 1.99.08 of the system calls solutions released.
+20140919 dholland	Move uio_uinit to uio.c where it really belongs.
+20140916 dholland	Rewrite the exec design notes.
+20140916 dholland	Improve the argv buffer allocation strategy.
+20140916 dholland	Remove limit on number of argv words in exec.
+20140916 dholland	Redo the argv handling in exec; now cleaner and better.
+20140916 dholland	Don't allocate char[PATH_MAX] on the kernel stack.
+20140822 dholland	Don't lock/use unseekable objects' offsets during I/O.
+20140822 dholland	Use separate locks for openfile offset and refcount.
+20140822 dholland	Updated the file syscall design notes.
+20140822 dholland	Tidied the file syscalls.
+20140822 dholland	Updated the filetable design notes.
+20140822 dholland	Rework the filetable abstraction completely.
+20140822 dholland	Rework the openfile abstraction completely.
+20140822 dholland	Don't include syscall-level code in the file tables.
+20140822 dholland	Split file.h -> openfile.h and filetable.h.
+
+20140123 dholland	Version 1.99.07 of the system calls solutions released.
+20140122 dholland	Mark sys__exit() __DEAD.
+20140122 dholland	waitpid now allows the status arg to be null.
+20130531 dholland	Adjust to base system addition of struct proc.
+20100108 dholland	Split out design notes for exec.
+20100108 dholland	Split out design notes for process syscalls.
+20100108 dholland	Split out design notes for file syscalls.
+20100108 dholland	Split out design notes for filetables.
+20100106 dholland	Split solution code into filetables, filesyscalls,
+			procsyscalls, exec, and scheduling patches.
+20090424 dholland	Fix crash caused by waking up parents too early.
+
+20090414 dholland	sol2-1.99.04 released.
+20090402 dholland	sol2-1.99.03 released.
+20090219 dholland	sol2-1.99.02 released.
+20090219 dholland	Update design notes.
+20090213 dholland	Merge the 1.x sol2 code into OS/161 2.x.
+
+
+------------------------------------------------------------
+
+20050913 dholland	sol2-1.11 released.
+20050812 dholland	Fix another missing error path in execv.
+
+20040203 dholland	sol2-1.10 released.
+20040203 dholland	Fix memory leak on error in execv.
+20040203 dholland	Move a block comment (about wait) where it belongs.
+
+20031227 dholland	sol2-1.09 released.
+20030626 dholland	Minor include fixes.
+20030612 dholland	Fix up some obsolete comments.
+
+20030310 dholland	sol2-1.08 released. (1.07 skipped.)
+20030309 dholland	Fix read and write syscalls to check O_RDONLY et al.
+20030309 dholland	Add support for WNOHANG.
+20030309 dholland	New wait/exit code again.
+20030129 dholland	Add prefix to struct filetable members for consistency.
+20030129 dholland	Add prefix to struct openfile members for consistency.
+
+20030117 dholland	sol2-1.06 released.
+20030117 dholland	Make initial bootup message say "solution set 2".
+
+20020917 dholland	sol2-1.05 released.
+20020916 dholland	Created this changelog from CVS log data.
+20020904 dholland	Fix bug in pid code.
+20020830 dholland	Use BOOTUP_PID instead of magic value 1.
+20020328 dholland	Fix missing lock_release calls on error.
+
+20020309 dholland	sol2-1.04 released.
+20020309 dholland	Design docs for sol2.
+20020308 dholland	New wait/exit code.
+20020307 dholland	Various fixes.
+20010619 dholland	Add fork implementation pursuant to asst2 changes.
+20010618 dholland	Various fixes and cleanup.
+20010611 dholland	Fix leaks in thread_fork.
+20010528 blackman	Bug fix.
+
+20010320 blackman	sol2-2001 released.
+20010320 blackman	More bug fixes.
+
+20010315 blackman	sol2-2001-buggy released.
+20010315 blackman	Bug fixes.
+20010314 blackman	Cleanup and commenting; waitpid test code.
+20010313 blackman	New sol2 code, including parts of the original code.
+20010312 blackman	Back out the previous sol2 code.
+20010224 dholland	Bug fixes.
+20010215 dholland	Initial sol2 code.

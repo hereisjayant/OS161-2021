@@ -35,6 +35,8 @@
 
 #include <types.h>
 #include <kern/errno.h>
+#include <kern/wait.h>
+#include <limits.h>
 #include <lib.h>
 #include <array.h>
 #include <cpu.h>
@@ -50,6 +52,8 @@
 #include <addrspace.h>
 #include <mainbus.h>
 #include <vnode.h>
+#include <pid.h>
+
 
 #include "opt-synchprobs.h"
 
@@ -793,13 +797,13 @@ thread_exit(void)
 
 	cur = curthread;
 
-	/*
-	 * Detach from our process. You might need to move this action
-	 * around, depending on how your wait/exit works.
-	 */
+	/* We should be attached only to the kernel process. */
+	KASSERT(cur->t_proc == kproc);
+
+	/* Detach from the kernel process. */
 	proc_remthread(cur);
 
-	/* Make sure we *are* detached (move this only if you're sure!) */
+	/* Make sure we *are* detached. */
 	KASSERT(cur->t_proc == NULL);
 
 	/* Check the stack guard band. */
@@ -807,7 +811,11 @@ thread_exit(void)
 
 	/* Interrupts off on this processor */
         splhigh();
+
+	/* This doesn't come back... */
 	thread_switch(S_ZOMBIE, NULL, NULL);
+
+	/* ...so if it does, something's wrong. */
 	panic("braaaaaaaiiiiiiiiiiinssssss\n");
 }
 

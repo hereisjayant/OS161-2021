@@ -46,6 +46,7 @@
 #include <mainbus.h>
 #include <vfs.h>
 #include <device.h>
+#include <pid.h>
 #include <syscall.h>
 #include <test.h>
 #include <version.h>
@@ -98,6 +99,7 @@ boot(void)
 
 	kprintf("\n");
 	kprintf("OS/161 base system version %s\n", BASE_VERSION);
+	kprintf("(with locks/CVs, system calls solutions)\n");
 	kprintf("%s", harvard_copyright);
 	kprintf("\n");
 
@@ -109,6 +111,7 @@ boot(void)
 	ram_bootstrap();
 	proc_bootstrap();
 	thread_bootstrap();
+	pid_bootstrap();
 	hardclock_bootstrap();
 	vfs_bootstrap();
 	kheap_nextgeneration();
@@ -126,6 +129,7 @@ boot(void)
 	/* Late phase of initialization. */
 	vm_bootstrap();
 	kprintf_bootstrap();
+	exec_bootstrap();
 	thread_start_cpus();
 
 	/* Default bootfs - but ignore failure, in case emu0 doesn't exist */
