@@ -67,6 +67,8 @@ machine mips file    arch/mips/vm/ram.c		# Physical memory accounting
 # it may not be suitable for all architectures.
 machine mips file    vm/copyinout.c		# copyin/out et al.
 
+machine mips file      arch/mips/vm/vm.c
+
 # For the early assignments, we supply a very stupid MIPS-only skeleton
 # of a VM system. It is just barely capable of running a single userlevel
 # program as long as that program's not very large.

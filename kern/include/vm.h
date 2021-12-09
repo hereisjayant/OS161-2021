@@ -38,12 +38,21 @@
 
 
 #include <machine/vm.h>
+#include <types.h>
 
 /* Fault-type arguments to vm_fault() */
 #define VM_FAULT_READ        0    /* A read was attempted */
 #define VM_FAULT_WRITE       1    /* A write was attempted */
 #define VM_FAULT_READONLY    2    /* A write to a readonly page was attempted*/
 
+struct coremap_entry {
+    // virtual address corresponding to the physical address
+    vaddr_t kvaddr;
+    // whether the page the coremap entry maps to is free or not
+    bool is_free;  
+    // number of pages this alloc_kpages was called with
+    unsigned npages;
+};
 
 /* Initialization function */
 void vm_bootstrap(void);
